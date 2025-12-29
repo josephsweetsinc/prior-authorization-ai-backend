@@ -131,9 +131,7 @@ async def create_request(
         HTTPException: If request creation fails.
 
     """
-    return await service.create_request(
-        user_id=user.id, request_data=request_data
-    )
+    return None
 
 
 @ambulance_request_router.get(
