@@ -117,7 +117,6 @@ class UserResponseShema(BaseModel):
 class UserListItemSchema(BaseModel):
     """Schema for user list item."""
 
-    id: int
     full_name: Annotated[
         str,
         Field(description='Full name of the user', examples=['John Doe']),
