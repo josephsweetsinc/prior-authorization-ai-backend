@@ -195,7 +195,20 @@ class UserService(BaseService):
         showing = len(users)
 
         # Convert to response schema
-        items = [UserListItemSchema.model_validate(u) for u in users]
+        items = []
+        for user in users:
+            full_name = f'{user.name} {user.surname}'
+            last_login = getattr(user, 'last_login', None)
+            items.append(
+                UserListItemSchema(
+                    id=user.id,
+                    full_name=full_name,
+                    email=user.email,
+                    role=user.role,
+                    is_active=user.is_active,
+                    last_login=last_login,
+                )
+            )
 
         return (
             items,
