@@ -211,6 +211,7 @@ class TestUserAdminEndpoints:
             mock_get.return_value = (
                 [
                     UserListItemSchema(
+                        id=1,
                         full_name='John Doe',
                         email='john@example.com',
                         role=UserRole.PROVIDER,
@@ -218,6 +219,7 @@ class TestUserAdminEndpoints:
                         last_login=datetime(2025, 1, 1, 12, 0, 0),
                     ),
                     UserListItemSchema(
+                        id=1,
                         full_name='Jane Smith',
                         email='jane@example.com',
                         role=UserRole.PROVIDER,
@@ -323,6 +325,7 @@ class TestUserAdminEndpoints:
             mock_get.return_value = (
                 [
                     UserListItemSchema(
+                        id=1,
                         full_name='Bob Johnson',
                         email='bob@example.com',
                         role=UserRole.PROVIDER,
@@ -385,6 +388,7 @@ class TestUserAdminEndpoints:
             mock_get.return_value = (
                 [
                     UserListItemSchema(
+                        id=1,
                         full_name='John Doe',
                         email='john@example.com',
                         role=UserRole.PROVIDER,
