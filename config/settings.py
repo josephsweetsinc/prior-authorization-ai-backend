@@ -229,7 +229,7 @@ class Settings(BaseSettings):
         default_factory=DatabaseSettings
     )
     logging_settings: LoggingSettings = Field(default_factory=LoggingSettings)
-    aws_settings: AwsSettings = Field(default_factory=AwsSettings)
+    aws_settings: AwsSettings = Field(default_factory=AwsSettings)  # type: ignore
     email_settings: EmailSettings = Field(default_factory=EmailSettings)
     llm_settings: LLMSettings = Field(default_factory=LLMSettings)
 
