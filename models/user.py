@@ -70,6 +70,11 @@ class User(BaseIdMixin, BaseTimeStampMixin, SoftDelete):
         comment='Date and time of last login',
     )
 
+    @property
+    def full_name(self) -> str:
+        """Return full name of the user."""
+        return f'{self.name} {self.surname}'
+
     def __repr__(self) -> str:
         """Return a string representation of the user."""
         return f'<User {self.email}>'

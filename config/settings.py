@@ -17,11 +17,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 env_mode = os.getenv('ENV', 'dev')
 """Current environment mode (dev, prod, etc.)."""
 
-match env_mode:
-    case 'prod':
-        env_file = BASE_DIR / '.env'
-    case 'dev':
-        env_file = BASE_DIR / '.env.dev'
+env_file = BASE_DIR / '.env'
 """Path to environment-specific .env file."""
 
 
