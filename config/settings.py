@@ -132,7 +132,7 @@ class AwsSettings(BaseSettings):
     ACCESS_KEY_ID: str | None = None
     SECRET_ACCESS_KEY: str | None = None
     REGION: str = 'us-east-1'
-    BUCKET_NAME: str
+    BUCKET_NAME: str | None = None
 
 
 class EmailSettings(BaseSettings):
