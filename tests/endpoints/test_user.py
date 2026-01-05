@@ -219,7 +219,7 @@ class TestUserAdminEndpoints:
                         last_login=datetime(2025, 1, 1, 12, 0, 0),
                     ),
                     UserListItemSchema(
-                        id=2,
+                        id=1,
                         full_name='Jane Smith',
                         email='jane@example.com',
                         role=UserRole.PROVIDER,
