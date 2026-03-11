@@ -36,6 +36,7 @@ from .user import (
     UserHasNoPermissionPermission,
     UserIsNotActiveException,
     UserNotFoundByIdException,
+    UserDeactivatedException,
 )
 
 __all__ = [
@@ -69,4 +70,5 @@ __all__ = [
     'UserNotFoundByEmailException',
     'UserNotFoundByIdException',
     'WrongCredentialsException',
+    'UserDeactivatedException',
 ]

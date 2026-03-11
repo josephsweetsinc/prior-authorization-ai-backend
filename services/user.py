@@ -14,7 +14,7 @@ from exceptions import (
     IncorrectFileSizeException,
     UnknownFiletypeException,
     UserHasNoPermissionPermission,
-    UserNotFoundByIdException,
+    UserNotFoundByIdException, UserDeactivatedException,
 )
 from models import User
 from models.user import UserRole
@@ -144,7 +144,7 @@ class UserService(BaseService):
         if not user:
             raise UserNotFoundByIdException
         if not user.is_active:
-            raise UserNotFoundByIdException
+            raise UserDeactivatedException
         return user
 
     async def get_me(self, user_id: int) -> UserResponseShema:

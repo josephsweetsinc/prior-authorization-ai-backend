@@ -55,6 +55,16 @@ class UserIsNotActiveException(UserException):
             detail='User is not active.',
         )
 
+class UserDeactivatedException(UserException):
+    """Raised when user is not active."""
+
+    def __init__(self) -> None:
+        """Initialize UserIsNotActiveException with a default message."""
+        super().__init__(
+            status_code=402,
+            detail='User is not active contact admin.',
+        )
+
 
 class UserHasNoPermissionPermission(UserException):
     """Raised when user does not have permission."""

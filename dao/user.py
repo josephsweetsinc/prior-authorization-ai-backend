@@ -304,7 +304,7 @@ class UserDAO(BaseDAO):
             Select: SQLAlchemy select statement with filters applied.
 
         """
-        stmt = select(User).where(User.is_active.is_(True))
+        stmt = select(User)
 
         if search:
             search_pattern = f'%{search}%'
