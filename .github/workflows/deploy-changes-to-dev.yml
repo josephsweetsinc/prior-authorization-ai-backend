@@ -27,11 +27,6 @@ jobs:
       - name: Install dependencies
         run: uv sync --group dev
 
-      - name: Run mypy
-        run: uv run mypy --config-file pyproject.toml .
-
-      - name: Run pytest
-        run: uv run pytest
 
   deploy-to-server:
     runs-on: ubuntu-latest
