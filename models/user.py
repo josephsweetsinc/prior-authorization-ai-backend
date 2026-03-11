@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Enum, String
+from sqlalchemy import DateTime, Enum, String, TIMESTAMP, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.models import BaseIdMixin, BaseTimeStampMixin, SoftDelete
@@ -78,7 +78,11 @@ class User(BaseIdMixin, BaseTimeStampMixin, SoftDelete):
         nullable=True,
         comment='S3 key for user avatar image',
     )
-
+    last_approved_at = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
     # Relationships
     organization: Mapped['Organization | None'] = relationship(
         'Organization',

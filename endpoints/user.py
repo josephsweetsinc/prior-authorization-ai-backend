@@ -136,6 +136,32 @@ async def delete_user(
 
 
 @user_router.patch(
+    path='/{user_id}/activate',
+    summary='Activate user by admin',
+    description='Activate a previously deactivated user (admin only). Also resets the 30-day approval window.',
+    response_model=UserResponseShema,
+    dependencies=[Depends(get_admin_user_from_token)],
+    tags=['admin'],
+)
+async def activate_user(
+    user_id: int,
+    service: Annotated[UserService, Depends(get_service(UserService))],
+) -> UserResponseShema:
+    """Activate a user by ID (admin only).
+
+    Args:
+        user_id: ID of the user to activate.
+        service: User service.
+
+    Returns:
+        UserResponseShema: The activated user information.
+
+    """
+    return await service.activate_user_by_id(user_id=user_id)
+
+
+
+@user_router.patch(
     path='/{user_id}',
     summary='Update another user info by admin',
     description=(

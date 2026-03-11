@@ -58,7 +58,10 @@ def create_celery_app() -> Celery:
         task_soft_time_limit=25 * 60,  # 25 minutes
         worker_prefetch_multiplier=1,
         worker_max_tasks_per_child=1000,
-        imports=('tasks.expiration_reminders',),
+        imports=(
+            'tasks.expiration_reminders',
+            'tasks.user_tasks',
+        ),
     )
 
     # Schedule periodic tasks
@@ -66,6 +69,10 @@ def create_celery_app() -> Celery:
         'check-expiration-reminders': {
             'task': 'tasks.expiration_reminders.check_expiration_reminders',
             'schedule': crontab(hour=8, minute=0),  # Daily at 8:00 AM
+        },
+        'deactivate-unapproved-providers': {
+            'task': 'tasks.user_tasks.deactivate_unapproved_providers',
+            'schedule': crontab(hour=0, minute=0),  # Daily at midnight
         },
     }
 

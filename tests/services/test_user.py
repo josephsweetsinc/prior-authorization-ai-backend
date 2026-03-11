@@ -238,3 +238,74 @@ class TestUserService:
 
         assert len(items) == 1
         assert items[0].full_name == 'John Doe'
+
+    @pytest.mark.asyncio
+    async def test_deactivate_unapproved_providers(
+        self,
+        service: UserService,
+        user_factory,
+        db_session,
+    ):
+        """Test deactivating unapproved providers older than 30 days."""
+        from datetime import timedelta
+        from sqlalchemy import update
+        from models import User
+
+        user1 = await user_factory(
+            email='recent_provider@example.com',
+            role=UserRole.PROVIDER,
+        )
+        
+        user2 = await user_factory(
+            email='old_provider@example.com',
+            role=UserRole.PROVIDER,
+        )
+        
+        user3 = await user_factory(
+            email='inactive_old_provider@example.com',
+            role=UserRole.PROVIDER,
+        )
+        
+        user4 = await user_factory(
+            email='old_admin@example.com',
+            role=UserRole.ADMIN,
+        )
+        
+        await db_session.commit()
+        
+        old_date = datetime.now(UTC) - timedelta(days=31)
+        
+        await db_session.execute(
+            update(User)
+            .where(User.id == user2.id)
+            .values(last_approved_at=old_date)
+        )
+        
+        await db_session.execute(
+            update(User)
+            .where(User.id == user3.id)
+            .values(last_approved_at=old_date, is_active=False)
+        )
+        
+        await db_session.execute(
+            update(User)
+            .where(User.id == user4.id)
+            .values(last_approved_at=old_date)
+        )
+        
+        await db_session.commit()
+        
+        deactivated_count = await service.deactivate_unapproved_providers()
+        
+        assert deactivated_count == 1
+        
+        await db_session.refresh(user1)
+        await db_session.refresh(user2)
+        await db_session.refresh(user3)
+        await db_session.refresh(user4)
+        
+        assert user1.is_active is True
+        assert user2.is_active is False
+        assert user2.deleted_at is not None
+        assert user3.is_active is False
+        assert user4.is_active is True

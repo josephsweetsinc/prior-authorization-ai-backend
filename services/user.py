@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 
 from fastapi import UploadFile
@@ -566,3 +567,83 @@ class UserService(BaseService):
         }
 
         return UserResponseShema.model_validate(response_data)
+
+    async def deactivate_unapproved_providers(self) -> int:
+        """Deactivate providers whose last_approved_at is older than 30 days.
+
+        Returns:
+            int: Number of deactivated users.
+        """
+        cutoff_date = datetime.now(UTC) - timedelta(days=30)
+        deactivated_count = (
+            await self._user_dao.deactivate_unapproved_providers(
+                cutoff_date=cutoff_date
+            )
+        )
+        if deactivated_count > 0:
+            await self._session.commit()
+        return deactivated_count
+
+    async def activate_user_by_id(self, user_id: int) -> UserResponseShema:
+        """Activate a user by ID (admin only).
+
+        Sets ``is_active = True``, clears ``deleted_at`` and resets
+        ``last_approved_at`` to now so the 30-day approval window restarts.
+
+        Args:
+            user_id: ID of the user to activate.
+
+        Returns:
+            UserResponseShema: The activated user information.
+
+        Raises:
+            UserNotFoundByIdException: If no user exists with the given ID.
+
+        """
+        from sqlalchemy import update as sa_update  # noqa: PLC0415
+
+        # Activate + reset approval timestamp in one round-trip
+        stmt = (
+            sa_update(User)
+            .where(User.id == user_id)
+            .values(
+                is_active=True,
+                deleted_at=None,
+                last_approved_at=datetime.now(UTC),
+            )
+            .returning(User)
+        )
+        result = await self._session.execute(stmt)
+        user: User | None = result.scalar_one_or_none()
+        if not user:
+            raise UserNotFoundByIdException
+
+        await self._session.commit()
+
+        # Load organization if exists
+        organization_dao = OrganizationDAO(self._session)
+        organization = await organization_dao.get_by_user_id(user_id)
+
+        response_data = {
+            'id': user.id,
+            'name': user.name,
+            'surname': user.surname,
+            'email': user.email,
+            'role': user.role,
+            'is_active': user.is_active,
+            'phone': user.phone_number,
+            'position': user.position,
+            'place_of_work': user.place_of_work,
+            'last_login': user.last_login,
+            'created_at': user.created_at,
+            'avatar_url': None,
+            'organization': (
+                OrganizationResponseSchema.model_validate(organization)
+                if organization
+                else None
+            ),
+        }
+
+        return UserResponseShema.model_validate(response_data)
+
+
