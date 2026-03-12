@@ -85,19 +85,16 @@ class UserService(BaseService):
         role: UserRole = (
             user_role if user_role is not None else UserRole.PROVIDER
         )
-        try:
-            created_user: User = await self._user_dao.create(
-                name=user_data.name,
-                surname=user_data.surname,
-                email=user_data.email,
-                password=hashed_pass,
-                role=role,
-                phone_number=getattr(user_data, 'phone_number', None),
-                position=getattr(user_data, 'position', None),
-                place_of_work=getattr(user_data, 'place_of_work', None),
-            )
-        except IntegrityError:
-            raise EmailAlreadyRegisteredException from None
+        created_user: User = await self._user_dao.create(
+            name=user_data.name,
+            surname=user_data.surname,
+            email=user_data.email,
+            password=hashed_pass,
+            role=role,
+            phone_number=getattr(user_data, 'phone_number', None),
+            position=getattr(user_data, 'position', None),
+            place_of_work=getattr(user_data, 'place_of_work', None),
+        )
         await self._session.commit()
 
         # Load organization if exists
@@ -436,7 +433,7 @@ class UserService(BaseService):
                 email=user.email,
                 role=user.role,
                 is_active=user.is_active,
-                last_login=user.last_login,
+                last_approved_at=user.last_approved_at,
             )
             for user in users
         ]

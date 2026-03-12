@@ -303,12 +303,12 @@ class UserListItemSchema(BaseModel):
         bool,
         Field(description='Whether the user is active', examples=[True]),
     ]
-    last_login: Annotated[
+    last_approved_at: Annotated[
         datetime | None,
         Field(
             None,
-            description='Date and time of last login',
-            examples=[datetime(2025, 1, 1, 12, 0, 0)],  # noqa: DTZ001
+            description='Date and time when the user was last approved',
+            examples=[datetime(2025, 1, 1, 12, 0, 0, tzinfo=None)],  # noqa: DTZ001
         ),
     ]
 
