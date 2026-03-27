@@ -137,9 +137,6 @@ async def websocket_notifications(
             )
             return
 
-        # Validate token and get user
-        # Create services manually WebSocket doesn't support Depends
-
         async with async_session_maker() as session:
             auth_service = AuthService(db_session=session)
             user_service = UserService(db_session=session)
@@ -156,18 +153,13 @@ async def websocket_notifications(
                 await websocket.close(code=1008, reason='User not found')
                 return
 
-            # Register the connection for this user
-            websocket_manager.active_connections[user.id] = websocket
-            logger.info('WebSocket connected for user %s', user.id)
+        websocket_manager.active_connections[user.id] = websocket
+        logger.info('WebSocket connected for user %s', user.id)
 
-            # Keep the connection alive and handle messages
-            while True:
-                # Wait for messages (ping/pong or other messages)
-                data = await websocket.receive_text()
-                logger.debug('Received message from user %s: %s', user.id, data)
+        while True:
+            data = await websocket.receive_text()
+            logger.debug('Received message from user %s: %s', user.id, data)
 
-                # Optionally handle incoming messages (e.g., ping/pong)
-                # For now, we just keep the connection alive
 
     except WebSocketDisconnect:
         if user:
