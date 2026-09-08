@@ -885,3 +885,43 @@ class TestDownloadCallSheetPdfEndpoint:
         mock_generate.assert_awaited_once_with(
             request_id=156, user=mock_user
         )
+
+
+class TestDownloadCms1500PdfEndpoint:
+    """Test suite for the CMS-1500 PDF download endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_download_cms1500_pdf_success(
+        self,
+        client: TestClient,
+        auth_headers,
+        mock_user,
+    ):
+        """Test successfully downloading a CMS-1500 PDF."""
+
+        async def get_user_override():
+            return mock_user
+
+        app.dependency_overrides[get_current_user] = get_user_override
+
+        with patch(
+            'services.ambulance_request.AmbulanceRequestService'
+            '.generate_cms1500_pdf',
+            new_callable=AsyncMock,
+        ) as mock_generate:
+            mock_generate.return_value = b'%PDF-fake-cms1500-content'
+
+            response = client.get(
+                '/Prod/api/v1/ambulance-request/156/cms1500-pdf',
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        assert response.headers['content-type'] == 'application/pdf'
+        assert 'CMS-1500_Request-156' in (
+            response.headers['content-disposition']
+        )
+        assert response.content == b'%PDF-fake-cms1500-content'
+        mock_generate.assert_awaited_once_with(
+            request_id=156, user=mock_user
+        )

@@ -1086,3 +1086,102 @@ class TestGenerateCallSheetPdf:
             await service.generate_call_sheet_pdf(
                 request_id=999999, user=user
             )
+
+
+class TestGenerateCms1500Pdf:
+    """Test suite for AmbulanceRequestService.generate_cms1500_pdf()."""
+
+    @pytest.fixture
+    def service(self, db_session) -> AmbulanceRequestService:
+        """Create AmbulanceRequestService instance with S3/AI mocked."""
+        return AmbulanceRequestService(
+            db_session=db_session,
+            s3_actions=MagicMock(spec=S3Actions),
+            ai_extraction_service=MagicMock(spec=AIExtractionService),
+        )
+
+    @pytest.mark.asyncio
+    async def test_provider_can_download_own_request(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a provider can download the CMS-1500 for their own
+        request.
+        """  # noqa: D205
+        user = await user_factory()
+        request = await ambulance_request_factory(user_id=user.id)
+        await db_session.commit()
+        service._cms1500_generator_service = MagicMock()
+        generate = service._cms1500_generator_service.generate_cms1500_pdf
+        generate.return_value = b'%PDF-fake'
+
+        pdf_bytes = await service.generate_cms1500_pdf(
+            request_id=request.id, user=user
+        )
+
+        assert pdf_bytes == b'%PDF-fake'
+
+    @pytest.mark.asyncio
+    async def test_provider_cannot_download_others_request(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a provider cannot download another provider's
+        CMS-1500.
+        """  # noqa: D205
+        owner = await user_factory(email='cms-owner@example.com')
+        other = await user_factory(email='cms-other@example.com')
+        request = await ambulance_request_factory(user_id=owner.id)
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestPermissionException):
+            await service.generate_cms1500_pdf(
+                request_id=request.id, user=other
+            )
+
+    @pytest.mark.asyncio
+    async def test_admin_can_download_any_request(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that an admin can download any request's CMS-1500."""
+        owner = await user_factory(email='cms-owner2@example.com')
+        admin = await user_factory(
+            email='cms-admin2@example.com', role=UserRole.ADMIN
+        )
+        request = await ambulance_request_factory(user_id=owner.id)
+        await db_session.commit()
+        service._cms1500_generator_service = MagicMock()
+        generate = service._cms1500_generator_service.generate_cms1500_pdf
+        generate.return_value = b'%PDF-fake'
+
+        pdf_bytes = await service.generate_cms1500_pdf(
+            request_id=request.id, user=admin
+        )
+
+        assert pdf_bytes == b'%PDF-fake'
+
+    @pytest.mark.asyncio
+    async def test_not_found_raises(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        db_session,
+    ):
+        """Test that a nonexistent request raises."""
+        user = await user_factory()
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestNotFoundException):
+            await service.generate_cms1500_pdf(
+                request_id=999999, user=user
+            )

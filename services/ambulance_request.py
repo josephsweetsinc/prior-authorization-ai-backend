@@ -53,6 +53,7 @@ from schemas import (
 from services.ai.extractor import AIExtractionService
 from services.aws.actions import S3Actions
 from services.call_sheet import CallSheetService
+from services.cms1500_generator import CMS1500GeneratorService
 from services.notification import NotificationService
 from services.pdf_generator import PDFGeneratorService
 
@@ -83,6 +84,7 @@ class AmbulanceRequestService(BaseService):
         user_dao: UserDAO | None = None,
         pdf_generator_service: PDFGeneratorService | None = None,
         call_sheet_service: CallSheetService | None = None,
+        cms1500_generator_service: CMS1500GeneratorService | None = None,
     ):
         """Initialize AmbulanceRequestService."""
         super().__init__(db_session)
@@ -105,6 +107,9 @@ class AmbulanceRequestService(BaseService):
         )
         self._call_sheet_service = (
             call_sheet_service or CallSheetService()
+        )
+        self._cms1500_generator_service = (
+            cms1500_generator_service or CMS1500GeneratorService()
         )
 
     async def upload_file(
@@ -1564,6 +1569,51 @@ Necessity document, or "NO" if it is not."""
 
         logger.info(
             'Generated Call Sheet PDF for request %s (size: %d bytes)',
+            request_id,
+            len(pdf_bytes),
+        )
+
+        return pdf_bytes
+
+    async def generate_cms1500_pdf(
+        self,
+        request_id: int,
+        user: User,
+    ) -> bytes:
+        """Generate a CMS-1500 claim data summary PDF for a request.
+
+        Like the Call Sheet, this does not require full completion-status
+        validation - it is a data summary reviewable at any stage, and
+        clearly marks which CMS-1500 fields (service lines, billing
+        provider info) are not yet available from prior authorization
+        data.
+
+        Args:
+            request_id: ID of the request to generate the CMS-1500 for.
+            user: Current authenticated user.
+
+        Returns:
+            bytes: CMS-1500 PDF file bytes.
+
+        Raises:
+            AmbulanceRequestNotFoundException: If request not found.
+            AmbulanceRequestPermissionException: If user doesn't have
+                permission.
+
+        """
+        request = await self._request_dao.get_by_id(request_id=request_id)
+        if not request:
+            raise AmbulanceRequestNotFoundException
+
+        if request.user_id != user.id and user.role != UserRole.ADMIN:
+            raise AmbulanceRequestPermissionException
+
+        pdf_bytes = self._cms1500_generator_service.generate_cms1500_pdf(
+            request=request
+        )
+
+        logger.info(
+            'Generated CMS-1500 PDF for request %s (size: %d bytes)',
             request_id,
             len(pdf_bytes),
         )

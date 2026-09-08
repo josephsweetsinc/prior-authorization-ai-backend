@@ -309,6 +309,60 @@ async def download_call_sheet_pdf(
 
 
 @ambulance_request_router.get(
+    '/{request_id}/cms1500-pdf',
+    description='Download CMS-1500 claim data summary PDF for a request',
+    summary='Download CMS-1500 PDF',
+    response_class=Response,
+)
+@exception_handler
+async def download_cms1500_pdf(
+    request_id: int,
+    user: Annotated[User, Security(get_current_user)],
+    service: Annotated[
+        AmbulanceRequestService, Depends(get_service(AmbulanceRequestService))
+    ],
+) -> Response:
+    """Download CMS-1500 claim data summary PDF for a request.
+
+    Admin users can download the CMS-1500 summary for any request.
+    Provider users can only download it for their own requests.
+
+    This is a data summary of the CMS-1500 fields available from prior
+    authorization data (insurance, patient, diagnosis, referring
+    physician), labeled with the form's real box numbers. Service-line
+    and billing provider data (Boxes 24, 25, 32, 33) are not available
+    from this system and are called out on the document for billing
+    staff to complete.
+
+    Args:
+        request_id: Request ID to generate the CMS-1500 summary for.
+        user: Current authenticated user (admin or provider).
+        service: Ambulance request service.
+
+    Returns:
+        Response: PDF file as downloadable attachment.
+
+    Raises:
+        HTTPException: If request not found or permission denied.
+
+    """
+    pdf_bytes = await service.generate_cms1500_pdf(
+        request_id=request_id, user=user
+    )
+
+    timestamp = datetime.now(UTC).strftime('%Y%m%d_%H%M%S')
+    filename = f'CMS-1500_Request-{request_id}_{timestamp}.pdf'
+
+    return Response(
+        content=pdf_bytes,
+        media_type='application/pdf',
+        headers={
+            'Content-Disposition': f'attachment; filename="{filename}"',
+        },
+    )
+
+
+@ambulance_request_router.get(
     '/{request_id}',
     description='Get ambulance request by ID',
     response_model=RequestWithStatusHistorySchema
