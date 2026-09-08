@@ -845,3 +845,43 @@ class TestAmbulanceRequestEndpoints:
             # completion_status should be computed and included in response
             assert 'completion_status' in data
             assert data['completion_status']['overall_status'] == 'complete'
+
+
+class TestDownloadCallSheetPdfEndpoint:
+    """Test suite for the Call Sheet PDF download endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_download_call_sheet_pdf_success(
+        self,
+        client: TestClient,
+        auth_headers,
+        mock_user,
+    ):
+        """Test successfully downloading a Call Sheet PDF."""
+
+        async def get_user_override():
+            return mock_user
+
+        app.dependency_overrides[get_current_user] = get_user_override
+
+        with patch(
+            'services.ambulance_request.AmbulanceRequestService'
+            '.generate_call_sheet_pdf',
+            new_callable=AsyncMock,
+        ) as mock_generate:
+            mock_generate.return_value = b'%PDF-fake-call-sheet-content'
+
+            response = client.get(
+                '/Prod/api/v1/ambulance-request/156/call-sheet-pdf',
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        assert response.headers['content-type'] == 'application/pdf'
+        assert 'Call-Sheet_Request-156' in (
+            response.headers['content-disposition']
+        )
+        assert response.content == b'%PDF-fake-call-sheet-content'
+        mock_generate.assert_awaited_once_with(
+            request_id=156, user=mock_user
+        )

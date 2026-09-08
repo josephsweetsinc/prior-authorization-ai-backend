@@ -256,6 +256,59 @@ async def download_pdf(
 
 
 @ambulance_request_router.get(
+    '/{request_id}/call-sheet-pdf',
+    description='Download Call Sheet PDF for a request',
+    summary='Download Call Sheet PDF',
+    response_class=Response,
+)
+@exception_handler
+async def download_call_sheet_pdf(
+    request_id: int,
+    user: Annotated[User, Security(get_current_user)],
+    service: Annotated[
+        AmbulanceRequestService, Depends(get_service(AmbulanceRequestService))
+    ],
+) -> Response:
+    """Download Call Sheet PDF for a request.
+
+    Admin users can download the Call Sheet for any request.
+    Provider users can only download it for their own requests.
+
+    The Call Sheet is pre-filled with the fields known from the request
+    (patient name, origin, destination, date of service, ordering
+    physician); everything else on the form (vitals, chief complaint,
+    medications, times, driver/attendant, etc.) is left blank and
+    fillable for the crew to complete during the actual transport.
+
+    Args:
+        request_id: Request ID to generate the Call Sheet for.
+        user: Current authenticated user (admin or provider).
+        service: Ambulance request service.
+
+    Returns:
+        Response: PDF file as downloadable attachment.
+
+    Raises:
+        HTTPException: If request not found or permission denied.
+
+    """
+    pdf_bytes = await service.generate_call_sheet_pdf(
+        request_id=request_id, user=user
+    )
+
+    timestamp = datetime.now(UTC).strftime('%Y%m%d_%H%M%S')
+    filename = f'Call-Sheet_Request-{request_id}_{timestamp}.pdf'
+
+    return Response(
+        content=pdf_bytes,
+        media_type='application/pdf',
+        headers={
+            'Content-Disposition': f'attachment; filename="{filename}"',
+        },
+    )
+
+
+@ambulance_request_router.get(
     '/{request_id}',
     description='Get ambulance request by ID',
     response_model=RequestWithStatusHistorySchema

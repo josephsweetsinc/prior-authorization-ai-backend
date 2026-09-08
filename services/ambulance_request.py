@@ -52,6 +52,7 @@ from schemas import (
 )
 from services.ai.extractor import AIExtractionService
 from services.aws.actions import S3Actions
+from services.call_sheet import CallSheetService
 from services.notification import NotificationService
 from services.pdf_generator import PDFGeneratorService
 
@@ -81,6 +82,7 @@ class AmbulanceRequestService(BaseService):
         notification_service: NotificationService | None = None,
         user_dao: UserDAO | None = None,
         pdf_generator_service: PDFGeneratorService | None = None,
+        call_sheet_service: CallSheetService | None = None,
     ):
         """Initialize AmbulanceRequestService."""
         super().__init__(db_session)
@@ -100,6 +102,9 @@ class AmbulanceRequestService(BaseService):
         self._user_dao = user_dao or UserDAO(db_session)
         self._pdf_generator_service = (
             pdf_generator_service or PDFGeneratorService()
+        )
+        self._call_sheet_service = (
+            call_sheet_service or CallSheetService()
         )
 
     async def upload_file(
@@ -1515,6 +1520,50 @@ Necessity document, or "NO" if it is not."""
 
         logger.info(
             'Generated CMS-10344 PDF for request %s (size: %d bytes)',
+            request_id,
+            len(pdf_bytes),
+        )
+
+        return pdf_bytes
+
+    async def generate_call_sheet_pdf(
+        self,
+        request_id: int,
+        user: User,
+    ) -> bytes:
+        """Generate a Call Sheet PDF for a request.
+
+        Unlike the CMS-10344 PDF, the Call Sheet is an operational
+        dispatch document, not a regulatory submission, so it can be
+        generated as soon as the request exists - it does not require
+        the same full completion-status validation.
+
+        Args:
+            request_id: ID of the request to generate the Call Sheet for.
+            user: Current authenticated user.
+
+        Returns:
+            bytes: Filled (but not flattened) Call Sheet PDF file bytes.
+
+        Raises:
+            AmbulanceRequestNotFoundException: If request not found.
+            AmbulanceRequestPermissionException: If user doesn't have
+                permission.
+
+        """
+        request = await self._request_dao.get_by_id(request_id=request_id)
+        if not request:
+            raise AmbulanceRequestNotFoundException
+
+        if request.user_id != user.id and user.role != UserRole.ADMIN:
+            raise AmbulanceRequestPermissionException
+
+        pdf_bytes = self._call_sheet_service.generate_call_sheet_pdf(
+            request=request
+        )
+
+        logger.info(
+            'Generated Call Sheet PDF for request %s (size: %d bytes)',
             request_id,
             len(pdf_bytes),
         )
