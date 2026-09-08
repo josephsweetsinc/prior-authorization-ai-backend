@@ -950,6 +950,13 @@ class TestAmbulanceRequestService:
         request.ai_accuracy = 0.9
         request.ordering_physician = "Dr"
         request.physician_phone = "555"
+        request.ordering_physician_npi = None
+        request.patient_sex = None
+        request.insurance_type = None
+        request.insurance_payer_name = None
+        request.insured_id_number = None
+        request.insured_name = None
+        request.patient_relationship_to_insured = None
         request.denial_reason = None
         request.denial_notes = None
         request.created_at = datetime.now(UTC)

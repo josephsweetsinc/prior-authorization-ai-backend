@@ -67,6 +67,34 @@ class AmbulatoryStatus(StrEnum):
     NON_AMBULATORY = 'non-ambulatory'
 
 
+class PatientSex(StrEnum):
+    """Enumeration of patient sex (CMS-1500 Box 3)."""
+
+    MALE = 'male'
+    FEMALE = 'female'
+
+
+class InsuranceType(StrEnum):
+    """Enumeration of insurance/payer types (CMS-1500 Box 1)."""
+
+    MEDICARE = 'medicare'
+    MEDICAID = 'medicaid'
+    TRICARE = 'tricare'
+    CHAMPVA = 'champva'
+    GROUP_HEALTH_PLAN = 'group_health_plan'
+    FECA_BLACK_LUNG = 'feca_black_lung'
+    OTHER = 'other'
+
+
+class PatientRelationshipToInsured(StrEnum):
+    """Enumeration of patient's relationship to insured (CMS-1500 Box 6)."""
+
+    SELF = 'self'
+    SPOUSE = 'spouse'
+    CHILD = 'child'
+    OTHER = 'other'
+
+
 class AmbulanceRequest(BaseIdMixin, BaseTimeStampMixin, SoftDelete):
     """Ambulance request model.
 
@@ -213,6 +241,48 @@ class AmbulanceRequest(BaseIdMixin, BaseTimeStampMixin, SoftDelete):
         Date,
         nullable=True,
         comment='Prior authorization expiration date',
+    )
+    patient_sex: Mapped['PatientSex | None'] = mapped_column(
+        Enum(PatientSex),
+        nullable=True,
+        comment='Patient sex (CMS-1500 Box 3)',
+    )
+    ordering_physician_npi: Mapped[str | None] = mapped_column(
+        String(10),
+        nullable=True,
+        comment='NPI of the ordering physician (CMS-1500 Box 17b)',
+    )
+    insurance_type: Mapped['InsuranceType | None'] = mapped_column(
+        Enum(InsuranceType),
+        nullable=True,
+        comment='Type of insurance/payer (CMS-1500 Box 1)',
+    )
+    insurance_payer_name: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+        comment='Name of the insurance carrier/payer',
+    )
+    insured_id_number: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        comment=(
+            "Insured's ID number (CMS-1500 Box 1a); "
+            'same as patient_id when the patient is the insured'
+        ),
+    )
+    insured_name: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+        comment=(
+            "Insured's name (CMS-1500 Box 4) if different from the patient"
+        ),
+    )
+    patient_relationship_to_insured: Mapped[
+        'PatientRelationshipToInsured | None'
+    ] = mapped_column(
+        Enum(PatientRelationshipToInsured),
+        nullable=True,
+        comment="Patient's relationship to insured (CMS-1500 Box 6)",
     )
 
     # Relationships

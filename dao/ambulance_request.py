@@ -8,6 +8,9 @@ from core.dao import BaseDAO
 from models.ambulance_request import (
     AmbulanceRequest,
     AmbulatoryStatus,
+    InsuranceType,
+    PatientRelationshipToInsured,
+    PatientSex,
     RequestStatus,
     RequestStatusHistory,
 )
@@ -39,6 +42,15 @@ class AmbulanceRequestDAO(BaseDAO):
         ai_accuracy: float | None = None,
         ordering_physician: str | None = None,
         physician_phone: str | None = None,
+        ordering_physician_npi: str | None = None,
+        patient_sex: PatientSex | None = None,
+        insurance_type: InsuranceType | None = None,
+        insurance_payer_name: str | None = None,
+        insured_id_number: str | None = None,
+        insured_name: str | None = None,
+        patient_relationship_to_insured: (
+            PatientRelationshipToInsured | None
+        ) = None,
     ) -> AmbulanceRequest:
         """Create a new ambulance request.
 
@@ -62,6 +74,15 @@ class AmbulanceRequestDAO(BaseDAO):
             ai_accuracy: AI confidence in filled data (optional).
             ordering_physician: Name of ordering physician (optional).
             physician_phone: Phone number of ordering physician (optional).
+            ordering_physician_npi: NPI of ordering physician (optional).
+            patient_sex: Patient sex (optional).
+            insurance_type: Type of insurance/payer (optional).
+            insurance_payer_name: Name of insurance carrier (optional).
+            insured_id_number: Insured's ID number (optional).
+            insured_name: Insured's name, if different from patient
+                (optional).
+            patient_relationship_to_insured: Patient's relationship to
+                insured (optional).
 
         Returns:
             AmbulanceRequest: Created request instance.
@@ -87,6 +108,13 @@ class AmbulanceRequestDAO(BaseDAO):
             ai_accuracy=ai_accuracy,
             ordering_physician=ordering_physician,
             physician_phone=physician_phone,
+            ordering_physician_npi=ordering_physician_npi,
+            patient_sex=patient_sex,
+            insurance_type=insurance_type,
+            insurance_payer_name=insurance_payer_name,
+            insured_id_number=insured_id_number,
+            insured_name=insured_name,
+            patient_relationship_to_insured=patient_relationship_to_insured,
         )
         self._session.add(request)
         await self._session.flush()

@@ -324,6 +324,15 @@ class AmbulanceRequestService(BaseService):
             ai_accuracy=extracted.confidence_score,
             ordering_physician=extracted.ordering_physician,
             physician_phone=extracted.physician_phone,
+            ordering_physician_npi=extracted.ordering_physician_npi,
+            patient_sex=extracted.patient_sex,
+            insurance_type=extracted.insurance_type,
+            insurance_payer_name=extracted.insurance_payer_name,
+            insured_id_number=extracted.insured_id_number,
+            insured_name=extracted.insured_name,
+            patient_relationship_to_insured=(
+                extracted.patient_relationship_to_insured
+            ),
         )
         await self._session.flush()
 
@@ -400,6 +409,26 @@ class AmbulanceRequestService(BaseService):
             request.ordering_physician = request_data.ordering_physician
         if request_data.physician_phone is not None:
             request.physician_phone = request_data.physician_phone
+        if request_data.ordering_physician_npi is not None:
+            request.ordering_physician_npi = (
+                request_data.ordering_physician_npi
+            )
+        if request_data.patient_sex is not None:
+            request.patient_sex = request_data.patient_sex
+        if request_data.insurance_type is not None:
+            request.insurance_type = request_data.insurance_type
+        if request_data.insurance_payer_name is not None:
+            request.insurance_payer_name = (
+                request_data.insurance_payer_name
+            )
+        if request_data.insured_id_number is not None:
+            request.insured_id_number = request_data.insured_id_number
+        if request_data.insured_name is not None:
+            request.insured_name = request_data.insured_name
+        if request_data.patient_relationship_to_insured is not None:
+            request.patient_relationship_to_insured = (
+                request_data.patient_relationship_to_insured
+            )
 
         # Check if request can be submitted (uses request state we just set)
         completion_status = await self.get_completion_status(request=request)
@@ -612,6 +641,15 @@ class AmbulanceRequestService(BaseService):
                 else None,
                 ordering_physician=request.ordering_physician,
                 physician_phone=request.physician_phone,
+                ordering_physician_npi=request.ordering_physician_npi,
+                patient_sex=request.patient_sex,
+                insurance_type=request.insurance_type,
+                insurance_payer_name=request.insurance_payer_name,
+                insured_id_number=request.insured_id_number,
+                insured_name=request.insured_name,
+                patient_relationship_to_insured=(
+                    request.patient_relationship_to_insured
+                ),
                 denial_reason=request.denial_reason,
                 denial_notes=request.denial_notes,
                 created_at=request.created_at,
@@ -1309,6 +1347,24 @@ Necessity document, or "NO" if it is not."""
             request.ordering_physician = update_data.ordering_physician
         if update_data.physician_phone is not None:
             request.physician_phone = update_data.physician_phone
+        if update_data.ordering_physician_npi is not None:
+            request.ordering_physician_npi = (
+                update_data.ordering_physician_npi
+            )
+        if update_data.patient_sex is not None:
+            request.patient_sex = update_data.patient_sex
+        if update_data.insurance_type is not None:
+            request.insurance_type = update_data.insurance_type
+        if update_data.insurance_payer_name is not None:
+            request.insurance_payer_name = update_data.insurance_payer_name
+        if update_data.insured_id_number is not None:
+            request.insured_id_number = update_data.insured_id_number
+        if update_data.insured_name is not None:
+            request.insured_name = update_data.insured_name
+        if update_data.patient_relationship_to_insured is not None:
+            request.patient_relationship_to_insured = (
+                update_data.patient_relationship_to_insured
+            )
         if update_data.denial_reason is not None:
             request.denial_reason = update_data.denial_reason
         if update_data.denial_notes is not None:
@@ -1387,6 +1443,15 @@ Necessity document, or "NO" if it is not."""
             else None,
             ordering_physician=request.ordering_physician,
             physician_phone=request.physician_phone,
+            ordering_physician_npi=request.ordering_physician_npi,
+            patient_sex=request.patient_sex,
+            insurance_type=request.insurance_type,
+            insurance_payer_name=request.insurance_payer_name,
+            insured_id_number=request.insured_id_number,
+            insured_name=request.insured_name,
+            patient_relationship_to_insured=(
+                request.patient_relationship_to_insured
+            ),
             denial_reason=request.denial_reason,
             denial_notes=request.denial_notes,
             created_at=request.created_at,
