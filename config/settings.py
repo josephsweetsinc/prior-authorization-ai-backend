@@ -192,6 +192,35 @@ class LLMSettings(BaseSettings):
     PDF_MAX_PAGES: int = 15
 
 
+class RingCentralSettings(BaseSettings):
+    """Settings for RingCentral fax integration.
+
+    All settings are prefixed with 'RINGCENTRAL_' in environment variables.
+
+    Attributes:
+        CLIENT_ID: RingCentral app client ID.
+        CLIENT_SECRET: RingCentral app client secret.
+        JWT: RingCentral JWT credential for server-to-server auth.
+        SERVER_URL: RingCentral API base URL (sandbox or production).
+        FAX_NUMBER: The RingCentral fax number faxes are received on.
+        WEBHOOK_SECRET: Shared secret required as a query parameter on the
+            inbound webhook URL, since RingCentral does not sign webhook
+            request bodies the way some providers do.
+
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix='RINGCENTRAL_', env_file=env_file, extra='ignore'
+    )
+
+    CLIENT_ID: str = ''
+    CLIENT_SECRET: str = ''
+    JWT: str = ''
+    SERVER_URL: str = 'https://platform.ringcentral.com'
+    FAX_NUMBER: str = ''
+    WEBHOOK_SECRET: str = ''
+
+
 class RedisSettings(BaseSettings):
     """Settings for Redis connection.
 
@@ -278,6 +307,9 @@ class Settings(BaseSettings):
     email_settings: EmailSettings = Field(default_factory=EmailSettings)
     llm_settings: LLMSettings = Field(default_factory=LLMSettings)
     redis_settings: RedisSettings = Field(default_factory=RedisSettings)
+    ringcentral_settings: RingCentralSettings = Field(
+        default_factory=RingCentralSettings
+    )
 
     @classmethod
     @cache

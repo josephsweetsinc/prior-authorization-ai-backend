@@ -18,6 +18,11 @@ from .auth import (
     RefreshTokenException,
     WrongCredentialsException,
 )
+from .fax import (
+    FaxNotFoundException,
+    FaxProviderException,
+    FaxWebhookUnauthorizedException,
+)
 from .file import IncorrectFileSizeException, UnknownFiletypeException
 from .notification import (
     NotificationMissingRequestException,
@@ -33,10 +38,10 @@ from .password_reset import (
 from .user import (
     BadPasswordSchemaException,
     EmailAlreadyRegisteredException,
+    UserDeactivatedException,
     UserHasNoPermissionPermission,
     UserIsNotActiveException,
     UserNotFoundByIdException,
-    UserDeactivatedException,
 )
 
 __all__ = [
@@ -54,6 +59,9 @@ __all__ = [
     'AmbulanceRequestSearchParametersMissingException',
     'BadPasswordSchemaException',
     'EmailAlreadyRegisteredException',
+    'FaxNotFoundException',
+    'FaxProviderException',
+    'FaxWebhookUnauthorizedException',
     'IncorrectFileSizeException',
     'InvalidResetCodeException',
     'NoFiltersException',
@@ -65,10 +73,10 @@ __all__ = [
     'ResetCodeExpiredException',
     'ResetCodeUsedException',
     'UnknownFiletypeException',
+    'UserDeactivatedException',
     'UserHasNoPermissionPermission',
     'UserIsNotActiveException',
     'UserNotFoundByEmailException',
     'UserNotFoundByIdException',
     'WrongCredentialsException',
-    'UserDeactivatedException',
 ]
