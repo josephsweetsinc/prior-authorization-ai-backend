@@ -6,6 +6,7 @@ from fastapi import UploadFile
 from langchain_core.messages import HumanMessage, SystemMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.settings import Settings
 from core import BaseService
 from dao import (
     AmbulanceRequestDAO,
@@ -33,7 +34,11 @@ from models import (
     User,
     UserRole,
 )
-from models.ambulance_request import DenialReason, TransportationType
+from models.ambulance_request import (
+    DenialReason,
+    NovitasStatus,
+    TransportationType,
+)
 from schemas import (
     AdminRequestWithStatusHistorySchema,
     AdminUpdateRequestSchema,
@@ -52,10 +57,15 @@ from schemas import (
 )
 from services.ai.extractor import AIExtractionService
 from services.aws.actions import S3Actions
+from services.call_sheet import CallSheetService
+from services.cms1500_generator import CMS1500GeneratorService
+from services.fax.fax_service import FaxService
 from services.notification import NotificationService
 from services.pdf_generator import PDFGeneratorService
 
 logger = logging.getLogger(__name__)
+
+settings = Settings.load()
 
 # Validation constants
 MIN_NAME_LENGTH = 3
@@ -81,6 +91,9 @@ class AmbulanceRequestService(BaseService):
         notification_service: NotificationService | None = None,
         user_dao: UserDAO | None = None,
         pdf_generator_service: PDFGeneratorService | None = None,
+        call_sheet_service: CallSheetService | None = None,
+        cms1500_generator_service: CMS1500GeneratorService | None = None,
+        fax_service: FaxService | None = None,
     ):
         """Initialize AmbulanceRequestService."""
         super().__init__(db_session)
@@ -101,6 +114,13 @@ class AmbulanceRequestService(BaseService):
         self._pdf_generator_service = (
             pdf_generator_service or PDFGeneratorService()
         )
+        self._call_sheet_service = (
+            call_sheet_service or CallSheetService()
+        )
+        self._cms1500_generator_service = (
+            cms1500_generator_service or CMS1500GeneratorService()
+        )
+        self._fax_service = fax_service or FaxService(db_session)
 
     async def upload_file(
         self,
@@ -324,6 +344,15 @@ class AmbulanceRequestService(BaseService):
             ai_accuracy=extracted.confidence_score,
             ordering_physician=extracted.ordering_physician,
             physician_phone=extracted.physician_phone,
+            ordering_physician_npi=extracted.ordering_physician_npi,
+            patient_sex=extracted.patient_sex,
+            insurance_type=extracted.insurance_type,
+            insurance_payer_name=extracted.insurance_payer_name,
+            insured_id_number=extracted.insured_id_number,
+            insured_name=extracted.insured_name,
+            patient_relationship_to_insured=(
+                extracted.patient_relationship_to_insured
+            ),
         )
         await self._session.flush()
 
@@ -400,6 +429,26 @@ class AmbulanceRequestService(BaseService):
             request.ordering_physician = request_data.ordering_physician
         if request_data.physician_phone is not None:
             request.physician_phone = request_data.physician_phone
+        if request_data.ordering_physician_npi is not None:
+            request.ordering_physician_npi = (
+                request_data.ordering_physician_npi
+            )
+        if request_data.patient_sex is not None:
+            request.patient_sex = request_data.patient_sex
+        if request_data.insurance_type is not None:
+            request.insurance_type = request_data.insurance_type
+        if request_data.insurance_payer_name is not None:
+            request.insurance_payer_name = (
+                request_data.insurance_payer_name
+            )
+        if request_data.insured_id_number is not None:
+            request.insured_id_number = request_data.insured_id_number
+        if request_data.insured_name is not None:
+            request.insured_name = request_data.insured_name
+        if request_data.patient_relationship_to_insured is not None:
+            request.patient_relationship_to_insured = (
+                request_data.patient_relationship_to_insured
+            )
 
         # Check if request can be submitted (uses request state we just set)
         completion_status = await self.get_completion_status(request=request)
@@ -612,8 +661,21 @@ class AmbulanceRequestService(BaseService):
                 else None,
                 ordering_physician=request.ordering_physician,
                 physician_phone=request.physician_phone,
+                ordering_physician_npi=request.ordering_physician_npi,
+                patient_sex=request.patient_sex,
+                insurance_type=request.insurance_type,
+                insurance_payer_name=request.insurance_payer_name,
+                insured_id_number=request.insured_id_number,
+                insured_name=request.insured_name,
+                patient_relationship_to_insured=(
+                    request.patient_relationship_to_insured
+                ),
                 denial_reason=request.denial_reason,
                 denial_notes=request.denial_notes,
+                utn=request.utn,
+                novitas_status=request.novitas_status,
+                novitas_submitted_at=request.novitas_submitted_at,
+                call_sheet_data=request.call_sheet_data,
                 created_at=request.created_at,
                 updated_at=request.updated_at,
                 status_history=status_history_schemas,
@@ -632,6 +694,10 @@ class AmbulanceRequestService(BaseService):
             transportation_type=request.transportation_type,
             patient_id=request.patient_id,
             form_number=request.form_number,
+            utn=request.utn,
+            novitas_status=request.novitas_status,
+            novitas_submitted_at=request.novitas_submitted_at,
+            call_sheet_data=request.call_sheet_data,
             created_at=request.created_at,
             updated_at=request.updated_at,
             status_history=status_history_schemas,
@@ -1309,10 +1375,32 @@ Necessity document, or "NO" if it is not."""
             request.ordering_physician = update_data.ordering_physician
         if update_data.physician_phone is not None:
             request.physician_phone = update_data.physician_phone
+        if update_data.ordering_physician_npi is not None:
+            request.ordering_physician_npi = (
+                update_data.ordering_physician_npi
+            )
+        if update_data.patient_sex is not None:
+            request.patient_sex = update_data.patient_sex
+        if update_data.insurance_type is not None:
+            request.insurance_type = update_data.insurance_type
+        if update_data.insurance_payer_name is not None:
+            request.insurance_payer_name = update_data.insurance_payer_name
+        if update_data.insured_id_number is not None:
+            request.insured_id_number = update_data.insured_id_number
+        if update_data.insured_name is not None:
+            request.insured_name = update_data.insured_name
+        if update_data.patient_relationship_to_insured is not None:
+            request.patient_relationship_to_insured = (
+                update_data.patient_relationship_to_insured
+            )
         if update_data.denial_reason is not None:
             request.denial_reason = update_data.denial_reason
         if update_data.denial_notes is not None:
             request.denial_notes = update_data.denial_notes
+        if update_data.utn is not None:
+            request.utn = update_data.utn
+        if update_data.novitas_status is not None:
+            request.novitas_status = update_data.novitas_status
 
         await self._session.flush()
         await self._session.commit()
@@ -1387,8 +1475,21 @@ Necessity document, or "NO" if it is not."""
             else None,
             ordering_physician=request.ordering_physician,
             physician_phone=request.physician_phone,
+            ordering_physician_npi=request.ordering_physician_npi,
+            patient_sex=request.patient_sex,
+            insurance_type=request.insurance_type,
+            insurance_payer_name=request.insurance_payer_name,
+            insured_id_number=request.insured_id_number,
+            insured_name=request.insured_name,
+            patient_relationship_to_insured=(
+                request.patient_relationship_to_insured
+            ),
             denial_reason=request.denial_reason,
             denial_notes=request.denial_notes,
+            utn=request.utn,
+            novitas_status=request.novitas_status,
+            novitas_submitted_at=request.novitas_submitted_at,
+            call_sheet_data=request.call_sheet_data,
             created_at=request.created_at,
             updated_at=request.updated_at,
             status_history=status_history_schemas,
@@ -1455,3 +1556,270 @@ Necessity document, or "NO" if it is not."""
         )
 
         return pdf_bytes
+
+    async def generate_call_sheet_pdf(
+        self,
+        request_id: int,
+        user: User,
+    ) -> bytes:
+        """Generate a Call Sheet PDF for a request.
+
+        Unlike the CMS-10344 PDF, the Call Sheet is an operational
+        dispatch document, not a regulatory submission, so it can be
+        generated as soon as the request exists - it does not require
+        the same full completion-status validation.
+
+        Args:
+            request_id: ID of the request to generate the Call Sheet for.
+            user: Current authenticated user.
+
+        Returns:
+            bytes: Filled (but not flattened) Call Sheet PDF file bytes.
+
+        Raises:
+            AmbulanceRequestNotFoundException: If request not found.
+            AmbulanceRequestPermissionException: If user doesn't have
+                permission.
+
+        """
+        request = await self._request_dao.get_by_id(request_id=request_id)
+        if not request:
+            raise AmbulanceRequestNotFoundException
+
+        if request.user_id != user.id and user.role != UserRole.ADMIN:
+            raise AmbulanceRequestPermissionException
+
+        pdf_bytes = self._call_sheet_service.generate_call_sheet_pdf(
+            request=request
+        )
+
+        logger.info(
+            'Generated Call Sheet PDF for request %s (size: %d bytes)',
+            request_id,
+            len(pdf_bytes),
+        )
+
+        return pdf_bytes
+
+    async def update_call_sheet_data(
+        self,
+        request_id: int,
+        data: dict[str, str],
+        user: User,
+    ) -> dict[str, str]:
+        """Merge interactively-entered values into a request's Call Sheet.
+
+        Used by the "eyeball check" console so an admin can fill in the
+        Call Sheet's operational fields (vitals, times, chief complaints,
+        etc.) before approving, instead of only being able to fill them
+        by hand on the printed PDF.
+
+        Args:
+            request_id: ID of the request to update.
+            data: Partial map of Call Sheet template field name to value.
+            user: Current authenticated user.
+
+        Returns:
+            dict[str, str]: The full merged call_sheet_data after saving.
+
+        Raises:
+            AmbulanceRequestNotFoundException: If request not found.
+            AmbulanceRequestPermissionException: If user doesn't have
+                permission.
+            AmbulanceRequestInvalidStatusException: If any field name is
+                not part of the Call Sheet template.
+
+        """
+        # Locks the row for the rest of this transaction so two concurrent
+        # saves (e.g. two admin tabs) can't each read the same base dict
+        # and silently drop each other's merged keys on commit.
+        request = await self._request_dao.get_by_id_for_update(
+            request_id=request_id
+        )
+        if not request:
+            raise AmbulanceRequestNotFoundException
+
+        if request.user_id != user.id and user.role != UserRole.ADMIN:
+            raise AmbulanceRequestPermissionException
+
+        valid_field_names = self._call_sheet_service.get_editable_field_names()
+        unknown_fields = set(data) - valid_field_names
+        if unknown_fields:
+            raise AmbulanceRequestInvalidStatusException(  # noqa: TRY003
+                f'Unknown Call Sheet field(s): '
+                f'{", ".join(sorted(unknown_fields))}'
+            )
+
+        merged = dict(request.call_sheet_data or {})
+        merged.update(data)
+        request.call_sheet_data = merged
+        await self._session.flush()
+        await self._session.commit()
+        await self._session.refresh(request)
+
+        return request.call_sheet_data or {}
+
+    async def generate_cms1500_pdf(
+        self,
+        request_id: int,
+        user: User,
+    ) -> bytes:
+        """Generate a CMS-1500 claim data summary PDF for a request.
+
+        Like the Call Sheet, this does not require full completion-status
+        validation - it is a data summary reviewable at any stage, and
+        clearly marks which CMS-1500 fields (service lines, billing
+        provider info) are not yet available from prior authorization
+        data.
+
+        Args:
+            request_id: ID of the request to generate the CMS-1500 for.
+            user: Current authenticated user.
+
+        Returns:
+            bytes: CMS-1500 PDF file bytes.
+
+        Raises:
+            AmbulanceRequestNotFoundException: If request not found.
+            AmbulanceRequestPermissionException: If user doesn't have
+                permission.
+
+        """
+        request = await self._request_dao.get_by_id(request_id=request_id)
+        if not request:
+            raise AmbulanceRequestNotFoundException
+
+        if request.user_id != user.id and user.role != UserRole.ADMIN:
+            raise AmbulanceRequestPermissionException
+
+        pdf_bytes = self._cms1500_generator_service.generate_cms1500_pdf(
+            request=request
+        )
+
+        logger.info(
+            'Generated CMS-1500 PDF for request %s (size: %d bytes)',
+            request_id,
+            len(pdf_bytes),
+        )
+
+        return pdf_bytes
+
+    async def submit_to_novitas(
+        self,
+        request_id: int,
+        user: User,
+    ) -> AmbulanceRequestResponseSchema:
+        """Fax the Novitas prior-authorization package for a request.
+
+        Builds the Novitas PA package - the CMS-10344 authorization form
+        plus any uploaded supporting documents (medical records, PCS,
+        etc.) - and faxes it to Novitas in a single transmission. This is
+        the "AI submits Novitas PA" step of the review-and-approve
+        workflow: it only runs after an admin has approved the request
+        (the single approval gate) and only once per request.
+
+        Args:
+            request_id: ID of the request to submit.
+            user: Current authenticated user (must be admin).
+
+        Returns:
+            AmbulanceRequestResponseSchema: Updated request.
+
+        Raises:
+            AmbulanceRequestNotFoundException: If request not found.
+            AmbulanceRequestPermissionException: If user is not an admin.
+            AmbulanceRequestInvalidStatusException: If the request has
+                not been approved yet, or has already been submitted.
+            AmbulanceRequestPDFGenerationException: If required fields
+                are missing, or the Novitas fax number is not configured.
+
+        """
+        request = await self._request_dao.get_by_id(request_id=request_id)
+        if not request:
+            raise AmbulanceRequestNotFoundException
+
+        if user.role != UserRole.ADMIN:
+            raise AmbulanceRequestPermissionException
+
+        if request.status != RequestStatus.APPROVED:
+            raise AmbulanceRequestInvalidStatusException(  # noqa: TRY003
+                'Request must be approved before submitting to Novitas'
+            )
+        if request.novitas_status != NovitasStatus.NOT_SUBMITTED:
+            raise AmbulanceRequestInvalidStatusException(  # noqa: TRY003
+                'Request has already been submitted to Novitas '
+                f'(status: {request.novitas_status.value})'
+            )
+
+        completion_status = await self.get_completion_status(request=request)
+        if not completion_status.can_submit:
+            missing_items = (
+                completion_status.missing_fields
+                + completion_status.missing_documents
+            )
+            missing_names = ', '.join(item.name for item in missing_items)
+            error_msg = (
+                f'Cannot submit to Novitas. Missing required items: '
+                f'{missing_names}. All required fields and documents '
+                f'must be completed before submission.'
+            )
+            raise AmbulanceRequestPDFGenerationException(error_msg)
+
+        novitas_fax_number = settings.ringcentral_settings.NOVITAS_FAX_NUMBER
+        if not novitas_fax_number:
+            raise AmbulanceRequestPDFGenerationException(  # noqa: TRY003
+                'Novitas fax number is not configured'
+            )
+
+        cms_pdf_bytes = self._pdf_generator_service.generate_cms_10344_pdf(
+            request=request
+        )
+        attachments: list[tuple[str, bytes, str]] = [
+            (
+                f'CMS-10344_Request-{request_id}.pdf',
+                cms_pdf_bytes,
+                'application/pdf',
+            ),
+        ]
+
+        files = await self._file_dao.get_by_request_id(request_id=request_id)
+        for file in files:
+            try:
+                content, content_type = self._s3_actions.download_from_s3(
+                    file.s3_key
+                )
+            except Exception:
+                logger.exception(
+                    'Failed to download supporting document %s for '
+                    'Novitas submission (request %s)',
+                    file.id,
+                    request_id,
+                )
+                continue
+            attachments.append((file.filename, content, content_type))
+
+        fax = await self._fax_service.send_outbound_fax(
+            to_number=novitas_fax_number,
+            attachments=attachments,
+            request_id=request_id,
+            cover_page_text=(
+                f'Novitas Prior Authorization Package - Request '
+                f'#{request_id} - {request.patient_first_name} '
+                f'{request.patient_last_name}'
+            ),
+        )
+
+        request.novitas_status = NovitasStatus.SUBMITTED
+        request.novitas_submitted_at = datetime.now(UTC)
+        request.novitas_fax_id = fax.id
+        await self._session.flush()
+        await self._session.commit()
+        await self._session.refresh(request)
+
+        logger.info(
+            'Submitted Novitas PA package for request %s (fax id=%s)',
+            request_id,
+            fax.id,
+        )
+
+        return AmbulanceRequestResponseSchema.model_validate(request)
