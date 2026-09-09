@@ -516,6 +516,48 @@ async def approve_request(
 
 
 @ambulance_request_router.post(
+    '/{request_id}/submit-to-novitas',
+    description=(
+        'Fax the Novitas prior-authorization package for a request '
+        '(admin only)'
+    ),
+    summary='Submit to Novitas',
+    response_model=AmbulanceRequestResponseSchema,
+)
+@exception_handler
+async def submit_to_novitas(
+    request_id: int,
+    user: Annotated[User, Security(get_admin_user_from_token)],
+    service: Annotated[
+        AmbulanceRequestService, Depends(get_service(AmbulanceRequestService))
+    ],
+) -> AmbulanceRequestResponseSchema:
+    """Fax the Novitas prior-authorization package for a request.
+
+    Only admin users can submit to Novitas, and only after the request
+    has been approved. Builds and sends the CMS-10344 authorization
+    form plus any uploaded supporting documents in a single fax.
+
+    Args:
+        request_id: Request ID to submit.
+        user: Current authenticated user (must be admin).
+        service: Ambulance request service.
+
+    Returns:
+        AmbulanceRequestResponseSchema: Updated request.
+
+    Raises:
+        HTTPException: If user is not admin, request not found, not
+            approved, already submitted, or the fax fails to send.
+
+    """
+    return await service.submit_to_novitas(
+        request_id=request_id,
+        user=user,
+    )
+
+
+@ambulance_request_router.post(
     '/{request_id}/deny',
     description='Deny an ambulance request (admin only)',
     summary='Deny request',

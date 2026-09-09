@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import UploadFile
 
+from config.settings import Settings
 from dao import (
     RequestFileDAO,
     RequestStatusHistoryDAO,
@@ -16,11 +17,17 @@ from exceptions import (
     AmbulanceRequestEmptyDocumentEmtpyException,
     AmbulanceRequestEmptyDocumentFileNameException,
     AmbulanceRequestInvalidFileIdsException,
+    AmbulanceRequestInvalidStatusException,
     AmbulanceRequestNotFoundException,
+    AmbulanceRequestPDFGenerationException,
     AmbulanceRequestPermissionException,
 )
 from exceptions.file import IncorrectFileSizeException, UnknownFiletypeException
-from models.ambulance_request import RequestStatus, TransportationType
+from models.ambulance_request import (
+    NovitasStatus,
+    RequestStatus,
+    TransportationType,
+)
 from models.user import UserRole
 from schemas.ambulance_request import CreateAmbulanceRequestSchema
 from services.ai.extractor import AIExtractionService
@@ -959,6 +966,9 @@ class TestAmbulanceRequestService:
         request.patient_relationship_to_insured = None
         request.denial_reason = None
         request.denial_notes = None
+        request.utn = None
+        request.novitas_status = NovitasStatus.NOT_SUBMITTED
+        request.novitas_submitted_at = None
         request.created_at = datetime.now(UTC)
         request.updated_at = datetime.now(UTC)
         request.reviewer_id = None
@@ -1185,3 +1195,278 @@ class TestGenerateCms1500Pdf:
             await service.generate_cms1500_pdf(
                 request_id=999999, user=user
             )
+
+
+class TestSubmitToNovitas:
+    """Test suite for AmbulanceRequestService.submit_to_novitas()."""
+
+    @pytest.fixture
+    def service(self, db_session) -> AmbulanceRequestService:
+        """Create AmbulanceRequestService instance with mocks."""
+        service = AmbulanceRequestService(
+            db_session=db_session,
+            s3_actions=MagicMock(spec=S3Actions),
+            ai_extraction_service=MagicMock(spec=AIExtractionService),
+        )
+        service._fax_service = MagicMock()
+        return service
+
+    @pytest.fixture(autouse=True)
+    def _reset_novitas_fax_number(self):
+        """Reset the Novitas fax number setting after each test."""
+        settings = Settings.load()
+        original = settings.ringcentral_settings.NOVITAS_FAX_NUMBER
+        yield
+        settings.ringcentral_settings.NOVITAS_FAX_NUMBER = original
+
+    def _mock_can_submit(
+        self, service: AmbulanceRequestService, *, can_submit: bool = True
+    ) -> None:
+        from schemas.ambulance_request import (
+            CompletionStatus,
+            CompletionStatusSchema,
+        )
+
+        service.get_completion_status = AsyncMock(
+            return_value=CompletionStatusSchema(
+                overall_status=(
+                    CompletionStatus.COMPLETE
+                    if can_submit
+                    else CompletionStatus.MISSING
+                ),
+                missing_fields=[],
+                missing_documents=[],
+                can_submit=can_submit,
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_not_found_raises(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        db_session,
+    ):
+        """Test that a nonexistent request raises."""
+        admin = await user_factory(
+            email='novitas-nf-admin@example.com', role=UserRole.ADMIN
+        )
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestNotFoundException):
+            await service.submit_to_novitas(request_id=999999, user=admin)
+
+    @pytest.mark.asyncio
+    async def test_non_admin_raises_permission(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a non-admin user cannot submit to Novitas."""
+        owner = await user_factory(email='novitas-owner@example.com')
+        request = await ambulance_request_factory(
+            user_id=owner.id, status=RequestStatus.APPROVED
+        )
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestPermissionException):
+            await service.submit_to_novitas(
+                request_id=request.id, user=owner
+            )
+
+    @pytest.mark.asyncio
+    async def test_not_approved_raises_invalid_status(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a non-approved request cannot be submitted."""
+        admin = await user_factory(
+            email='novitas-pending-admin@example.com', role=UserRole.ADMIN
+        )
+        owner = await user_factory(email='novitas-pending-owner@example.com')
+        request = await ambulance_request_factory(
+            user_id=owner.id, status=RequestStatus.PENDING
+        )
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestInvalidStatusException):
+            await service.submit_to_novitas(
+                request_id=request.id, user=admin
+            )
+
+    @pytest.mark.asyncio
+    async def test_already_submitted_raises_invalid_status(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a request already submitted cannot be resubmitted."""
+        admin = await user_factory(
+            email='novitas-dup-admin@example.com', role=UserRole.ADMIN
+        )
+        owner = await user_factory(email='novitas-dup-owner@example.com')
+        request = await ambulance_request_factory(
+            user_id=owner.id, status=RequestStatus.APPROVED
+        )
+        request.novitas_status = NovitasStatus.SUBMITTED
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestInvalidStatusException):
+            await service.submit_to_novitas(
+                request_id=request.id, user=admin
+            )
+
+    @pytest.mark.asyncio
+    async def test_incomplete_request_raises_pdf_generation_exception(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that an incomplete request cannot be submitted."""
+        admin = await user_factory(
+            email='novitas-incomplete-admin@example.com', role=UserRole.ADMIN
+        )
+        owner = await user_factory(
+            email='novitas-incomplete-owner@example.com'
+        )
+        request = await ambulance_request_factory(
+            user_id=owner.id, status=RequestStatus.APPROVED
+        )
+        await db_session.commit()
+        self._mock_can_submit(service, can_submit=False)
+
+        with pytest.raises(AmbulanceRequestPDFGenerationException):
+            await service.submit_to_novitas(
+                request_id=request.id, user=admin
+            )
+
+    @pytest.mark.asyncio
+    async def test_missing_fax_number_raises_pdf_generation_exception(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a missing Novitas fax number config raises."""
+        admin = await user_factory(
+            email='novitas-nofax-admin@example.com', role=UserRole.ADMIN
+        )
+        owner = await user_factory(email='novitas-nofax-owner@example.com')
+        request = await ambulance_request_factory(
+            user_id=owner.id, status=RequestStatus.APPROVED
+        )
+        await db_session.commit()
+        self._mock_can_submit(service)
+        Settings.load().ringcentral_settings.NOVITAS_FAX_NUMBER = ''
+
+        with pytest.raises(AmbulanceRequestPDFGenerationException):
+            await service.submit_to_novitas(
+                request_id=request.id, user=admin
+            )
+
+    @pytest.mark.asyncio
+    async def test_success_sends_fax_and_updates_status(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test a successful Novitas submission sends a fax and updates
+        the request's Novitas tracking fields.
+        """  # noqa: D205
+        admin = await user_factory(
+            email='novitas-ok-admin@example.com', role=UserRole.ADMIN
+        )
+        owner = await user_factory(email='novitas-ok-owner@example.com')
+        request = await ambulance_request_factory(
+            user_id=owner.id, status=RequestStatus.APPROVED
+        )
+        await db_session.commit()
+        self._mock_can_submit(service)
+        Settings.load().ringcentral_settings.NOVITAS_FAX_NUMBER = (
+            '+15559990000'
+        )
+        service._pdf_generator_service = MagicMock()
+        service._pdf_generator_service.generate_cms_10344_pdf.return_value = (
+            b'%PDF-cms'
+        )
+        service._file_dao.get_by_request_id = AsyncMock(return_value=[])
+        fake_fax = MagicMock(id=42)
+        service._fax_service.send_outbound_fax = AsyncMock(
+            return_value=fake_fax
+        )
+
+        result = await service.submit_to_novitas(
+            request_id=request.id, user=admin
+        )
+
+        assert result.id == request.id
+        service._fax_service.send_outbound_fax.assert_awaited_once()
+        call_kwargs = service._fax_service.send_outbound_fax.call_args.kwargs
+        assert call_kwargs['to_number'] == '+15559990000'
+        assert call_kwargs['request_id'] == request.id
+        assert len(call_kwargs['attachments']) == 1
+        assert call_kwargs['attachments'][0][1] == b'%PDF-cms'
+
+        await db_session.refresh(request)
+        assert request.novitas_status == NovitasStatus.SUBMITTED
+        assert request.novitas_fax_id == 42
+        assert request.novitas_submitted_at is not None
+
+    @pytest.mark.asyncio
+    async def test_success_includes_supporting_documents(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that linked supporting documents are attached to the fax."""
+        admin = await user_factory(
+            email='novitas-docs-admin@example.com', role=UserRole.ADMIN
+        )
+        owner = await user_factory(email='novitas-docs-owner@example.com')
+        request = await ambulance_request_factory(
+            user_id=owner.id, status=RequestStatus.APPROVED
+        )
+        await db_session.commit()
+        self._mock_can_submit(service)
+        Settings.load().ringcentral_settings.NOVITAS_FAX_NUMBER = (
+            '+15559990000'
+        )
+        service._pdf_generator_service = MagicMock()
+        service._pdf_generator_service.generate_cms_10344_pdf.return_value = (
+            b'%PDF-cms'
+        )
+        fake_file = MagicMock(id=1, filename='pcs.pdf', s3_key='key/pcs.pdf')
+        service._file_dao.get_by_request_id = AsyncMock(
+            return_value=[fake_file]
+        )
+        service._s3_actions.download_from_s3 = MagicMock(
+            return_value=(b'%PDF-pcs', 'application/pdf')
+        )
+        fake_fax = MagicMock(id=7)
+        service._fax_service.send_outbound_fax = AsyncMock(
+            return_value=fake_fax
+        )
+
+        await service.submit_to_novitas(request_id=request.id, user=admin)
+
+        call_kwargs = service._fax_service.send_outbound_fax.call_args.kwargs
+        assert len(call_kwargs['attachments']) == 2
+        assert call_kwargs['attachments'][1] == (
+            'pcs.pdf',
+            b'%PDF-pcs',
+            'application/pdf',
+        )

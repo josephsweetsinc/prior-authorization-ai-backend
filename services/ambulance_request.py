@@ -6,6 +6,7 @@ from fastapi import UploadFile
 from langchain_core.messages import HumanMessage, SystemMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.settings import Settings
 from core import BaseService
 from dao import (
     AmbulanceRequestDAO,
@@ -33,7 +34,11 @@ from models import (
     User,
     UserRole,
 )
-from models.ambulance_request import DenialReason, TransportationType
+from models.ambulance_request import (
+    DenialReason,
+    NovitasStatus,
+    TransportationType,
+)
 from schemas import (
     AdminRequestWithStatusHistorySchema,
     AdminUpdateRequestSchema,
@@ -54,10 +59,13 @@ from services.ai.extractor import AIExtractionService
 from services.aws.actions import S3Actions
 from services.call_sheet import CallSheetService
 from services.cms1500_generator import CMS1500GeneratorService
+from services.fax.fax_service import FaxService
 from services.notification import NotificationService
 from services.pdf_generator import PDFGeneratorService
 
 logger = logging.getLogger(__name__)
+
+settings = Settings.load()
 
 # Validation constants
 MIN_NAME_LENGTH = 3
@@ -85,6 +93,7 @@ class AmbulanceRequestService(BaseService):
         pdf_generator_service: PDFGeneratorService | None = None,
         call_sheet_service: CallSheetService | None = None,
         cms1500_generator_service: CMS1500GeneratorService | None = None,
+        fax_service: FaxService | None = None,
     ):
         """Initialize AmbulanceRequestService."""
         super().__init__(db_session)
@@ -111,6 +120,7 @@ class AmbulanceRequestService(BaseService):
         self._cms1500_generator_service = (
             cms1500_generator_service or CMS1500GeneratorService()
         )
+        self._fax_service = fax_service or FaxService(db_session)
 
     async def upload_file(
         self,
@@ -662,6 +672,9 @@ class AmbulanceRequestService(BaseService):
                 ),
                 denial_reason=request.denial_reason,
                 denial_notes=request.denial_notes,
+                utn=request.utn,
+                novitas_status=request.novitas_status,
+                novitas_submitted_at=request.novitas_submitted_at,
                 created_at=request.created_at,
                 updated_at=request.updated_at,
                 status_history=status_history_schemas,
@@ -680,6 +693,9 @@ class AmbulanceRequestService(BaseService):
             transportation_type=request.transportation_type,
             patient_id=request.patient_id,
             form_number=request.form_number,
+            utn=request.utn,
+            novitas_status=request.novitas_status,
+            novitas_submitted_at=request.novitas_submitted_at,
             created_at=request.created_at,
             updated_at=request.updated_at,
             status_history=status_history_schemas,
@@ -1379,6 +1395,10 @@ Necessity document, or "NO" if it is not."""
             request.denial_reason = update_data.denial_reason
         if update_data.denial_notes is not None:
             request.denial_notes = update_data.denial_notes
+        if update_data.utn is not None:
+            request.utn = update_data.utn
+        if update_data.novitas_status is not None:
+            request.novitas_status = update_data.novitas_status
 
         await self._session.flush()
         await self._session.commit()
@@ -1464,6 +1484,9 @@ Necessity document, or "NO" if it is not."""
             ),
             denial_reason=request.denial_reason,
             denial_notes=request.denial_notes,
+            utn=request.utn,
+            novitas_status=request.novitas_status,
+            novitas_submitted_at=request.novitas_submitted_at,
             created_at=request.created_at,
             updated_at=request.updated_at,
             status_history=status_history_schemas,
@@ -1619,3 +1642,123 @@ Necessity document, or "NO" if it is not."""
         )
 
         return pdf_bytes
+
+    async def submit_to_novitas(
+        self,
+        request_id: int,
+        user: User,
+    ) -> AmbulanceRequestResponseSchema:
+        """Fax the Novitas prior-authorization package for a request.
+
+        Builds the Novitas PA package - the CMS-10344 authorization form
+        plus any uploaded supporting documents (medical records, PCS,
+        etc.) - and faxes it to Novitas in a single transmission. This is
+        the "AI submits Novitas PA" step of the review-and-approve
+        workflow: it only runs after an admin has approved the request
+        (the single approval gate) and only once per request.
+
+        Args:
+            request_id: ID of the request to submit.
+            user: Current authenticated user (must be admin).
+
+        Returns:
+            AmbulanceRequestResponseSchema: Updated request.
+
+        Raises:
+            AmbulanceRequestNotFoundException: If request not found.
+            AmbulanceRequestPermissionException: If user is not an admin.
+            AmbulanceRequestInvalidStatusException: If the request has
+                not been approved yet, or has already been submitted.
+            AmbulanceRequestPDFGenerationException: If required fields
+                are missing, or the Novitas fax number is not configured.
+
+        """
+        request = await self._request_dao.get_by_id(request_id=request_id)
+        if not request:
+            raise AmbulanceRequestNotFoundException
+
+        if user.role != UserRole.ADMIN:
+            raise AmbulanceRequestPermissionException
+
+        if request.status != RequestStatus.APPROVED:
+            raise AmbulanceRequestInvalidStatusException(  # noqa: TRY003
+                'Request must be approved before submitting to Novitas'
+            )
+        if request.novitas_status != NovitasStatus.NOT_SUBMITTED:
+            raise AmbulanceRequestInvalidStatusException(  # noqa: TRY003
+                'Request has already been submitted to Novitas '
+                f'(status: {request.novitas_status.value})'
+            )
+
+        completion_status = await self.get_completion_status(request=request)
+        if not completion_status.can_submit:
+            missing_items = (
+                completion_status.missing_fields
+                + completion_status.missing_documents
+            )
+            missing_names = ', '.join(item.name for item in missing_items)
+            error_msg = (
+                f'Cannot submit to Novitas. Missing required items: '
+                f'{missing_names}. All required fields and documents '
+                f'must be completed before submission.'
+            )
+            raise AmbulanceRequestPDFGenerationException(error_msg)
+
+        novitas_fax_number = settings.ringcentral_settings.NOVITAS_FAX_NUMBER
+        if not novitas_fax_number:
+            raise AmbulanceRequestPDFGenerationException(  # noqa: TRY003
+                'Novitas fax number is not configured'
+            )
+
+        cms_pdf_bytes = self._pdf_generator_service.generate_cms_10344_pdf(
+            request=request
+        )
+        attachments: list[tuple[str, bytes, str]] = [
+            (
+                f'CMS-10344_Request-{request_id}.pdf',
+                cms_pdf_bytes,
+                'application/pdf',
+            ),
+        ]
+
+        files = await self._file_dao.get_by_request_id(request_id=request_id)
+        for file in files:
+            try:
+                content, content_type = self._s3_actions.download_from_s3(
+                    file.s3_key
+                )
+            except Exception:
+                logger.exception(
+                    'Failed to download supporting document %s for '
+                    'Novitas submission (request %s)',
+                    file.id,
+                    request_id,
+                )
+                continue
+            attachments.append((file.filename, content, content_type))
+
+        fax = await self._fax_service.send_outbound_fax(
+            to_number=novitas_fax_number,
+            attachments=attachments,
+            request_id=request_id,
+            cover_page_text=(
+                f'Novitas Prior Authorization Package - Request '
+                f'#{request_id} - {request.patient_first_name} '
+                f'{request.patient_last_name}'
+            ),
+        )
+
+        request.novitas_status = NovitasStatus.SUBMITTED
+        request.novitas_submitted_at = datetime.now(UTC)
+        request.novitas_fax_id = fax.id
+        await self._session.flush()
+        await self._session.commit()
+        await self._session.refresh(request)
+
+        logger.info(
+            'Submitted Novitas PA package for request %s (fax id=%s)',
+            request_id,
+            fax.id,
+        )
+
+        return AmbulanceRequestResponseSchema.model_validate(request)

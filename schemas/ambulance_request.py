@@ -13,6 +13,7 @@ from models.ambulance_request import (
     AmbulatoryStatus,
     DenialReason,
     InsuranceType,
+    NovitasStatus,
     PatientRelationshipToInsured,
     PatientSex,
     RequestStatus,
@@ -465,6 +466,30 @@ class AmbulanceRequestResponseSchema(BaseModel):
             examples=['CMS-10344'],
         ),
     ]
+    utn: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                'Unique Tracking Number issued by Novitas (CMS-1500 Box 23)'
+            ),
+            examples=['A1234B5678C9'],
+        ),
+    ]
+    novitas_status: Annotated[
+        NovitasStatus,
+        Field(
+            default=NovitasStatus.NOT_SUBMITTED,
+            description='Status of the external Novitas prior authorization',
+        ),
+    ]
+    novitas_submitted_at: Annotated[
+        datetime | None,
+        Field(
+            default=None,
+            description='When the Novitas PA package was faxed to Novitas',
+        ),
+    ]
     created_at: datetime
     updated_at: datetime
 
@@ -585,6 +610,9 @@ class AdminRequestWithStatusHistorySchema(BaseModel):
     patient_relationship_to_insured: PatientRelationshipToInsured | None
     denial_reason: DenialReason | None
     denial_notes: str | None
+    utn: str | None
+    novitas_status: NovitasStatus
+    novitas_submitted_at: datetime | None
     created_at: datetime
     updated_at: datetime
     status_history: list[RequestStatusHistoryResponseSchema] = []
@@ -774,6 +802,28 @@ class AdminUpdateRequestSchema(BaseModel):
             description=(
                 'Additional notes for denial '
                 '(required if denial_reason is OTHER_REASON)'
+            ),
+        ),
+    ]
+    utn: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=50,
+            description=(
+                'Unique Tracking Number issued by Novitas, recorded '
+                'manually once known (Novitas has no status API)'
+            ),
+            examples=['A1234B5678C9'],
+        ),
+    ]
+    novitas_status: Annotated[
+        NovitasStatus | None,
+        Field(
+            default=None,
+            description=(
+                'External Novitas prior authorization status, recorded '
+                'manually once known'
             ),
         ),
     ]

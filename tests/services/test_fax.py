@@ -6,7 +6,7 @@ import pytest
 
 from dao import IncomingFaxDAO
 from exceptions import FaxNotFoundException
-from models.incoming_fax import FaxStatus
+from models.incoming_fax import FaxDirection, FaxStatus
 from services.fax.fax_service import FaxService, extract_fax_message_ids
 from services.fax.ringcentral_client import RingCentralClient
 
@@ -229,3 +229,51 @@ class TestFaxService:
                 request_id=1,
                 matched_by_user_id=1,
             )
+
+    @pytest.mark.asyncio
+    async def test_send_outbound_fax_success(
+        self, service, mock_ringcentral_client
+    ):
+        """Test that a successful outbound send is recorded as SENT."""
+        mock_ringcentral_client.send_fax = AsyncMock(
+            return_value={
+                'id': 'rc-out-1',
+                'messageStatus': 'Sent',
+                'faxPageCount': 3,
+            }
+        )
+
+        fax = await service.send_outbound_fax(
+            to_number='+15559990000',
+            attachments=[('doc.pdf', b'%PDF-fake', 'application/pdf')],
+            request_id=42,
+            cover_page_text='Cover text',
+        )
+
+        assert fax.direction == FaxDirection.OUTBOUND
+        assert fax.status == FaxStatus.SENT
+        assert fax.to_number == '+15559990000'
+        assert fax.request_id == 42
+        assert fax.page_count == 3
+        mock_ringcentral_client.send_fax.assert_awaited_once_with(
+            to_number='+15559990000',
+            attachments=[('doc.pdf', b'%PDF-fake', 'application/pdf')],
+            cover_page_text='Cover text',
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_outbound_fax_queued_status(
+        self, service, mock_ringcentral_client
+    ):
+        """Test that a non-'Sent' provider status is recorded as QUEUED."""
+        mock_ringcentral_client.send_fax = AsyncMock(
+            return_value={'id': 'rc-out-2', 'messageStatus': 'Queued'}
+        )
+
+        fax = await service.send_outbound_fax(
+            to_number='+15559990000',
+            attachments=[('doc.pdf', b'%PDF-fake', 'application/pdf')],
+        )
+
+        assert fax.status == FaxStatus.QUEUED
+        assert fax.request_id is None

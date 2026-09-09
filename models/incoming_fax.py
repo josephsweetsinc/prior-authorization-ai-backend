@@ -28,17 +28,26 @@ class FaxDirection(StrEnum):
 class FaxStatus(StrEnum):
     """Enumeration of fax processing statuses.
 
+    Inbound:
     - RECEIVED: Fax content downloaded and stored, not yet linked.
     - PROCESSING: AI matching/extraction in progress.
     - MATCHED: Automatically or manually linked to an ambulance request.
     - UNRESOLVED: Could not be confidently matched; needs manual review.
-    - FAILED: Download, storage, or processing failed.
+
+    Outbound:
+    - QUEUED: Accepted by the fax provider, not yet confirmed sent.
+    - SENT: Confirmed sent by the fax provider.
+
+    Both directions:
+    - FAILED: Download, storage, processing, or transmission failed.
     """
 
     RECEIVED = 'received'
     PROCESSING = 'processing'
     MATCHED = 'matched'
     UNRESOLVED = 'unresolved'
+    QUEUED = 'queued'
+    SENT = 'sent'
     FAILED = 'failed'
 
 
@@ -129,8 +138,13 @@ class IncomingFax(BaseIdMixin, BaseTimeStampMixin, SoftDelete):
     )
 
     # Relationships
+    # foreign_keys is explicit here because AmbulanceRequest.novitas_fax_id
+    # is a second, independent FK column between these two tables (pointing
+    # the other direction), which would otherwise make the join condition
+    # for this relationship ambiguous.
     request: Mapped['AmbulanceRequest | None'] = relationship(
         'AmbulanceRequest',
+        foreign_keys=[request_id],
     )
     matched_by_user: Mapped['User | None'] = relationship(
         'User',

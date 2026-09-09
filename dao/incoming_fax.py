@@ -20,6 +20,7 @@ class IncomingFaxDAO(BaseDAO):
         s3_key: str | None = None,
         content_type: str | None = None,
         file_size: int | None = None,
+        request_id: int | None = None,
     ) -> IncomingFax:
         """Create a new incoming fax record.
 
@@ -33,6 +34,8 @@ class IncomingFaxDAO(BaseDAO):
             s3_key: S3 object key of the stored document.
             content_type: MIME type of the stored document.
             file_size: Size of the stored document in bytes.
+            request_id: Ambulance request this fax relates to, if known
+                at creation time (used for outbound fax records).
 
         Returns:
             IncomingFax: Created fax instance.
@@ -48,6 +51,7 @@ class IncomingFaxDAO(BaseDAO):
             s3_key=s3_key,
             content_type=content_type,
             file_size=file_size,
+            request_id=request_id,
         )
         self._session.add(fax)
         await self._session.flush()

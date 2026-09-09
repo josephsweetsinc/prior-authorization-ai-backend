@@ -256,6 +256,58 @@ class FaxService(BaseService):
             total_pages=total_pages,
         )
 
+    async def send_outbound_fax(
+        self,
+        *,
+        to_number: str,
+        attachments: list[tuple[str, bytes, str]],
+        request_id: int | None = None,
+        cover_page_text: str | None = None,
+    ) -> IncomingFax:
+        """Send an outbound fax via RingCentral and record it.
+
+        Args:
+            to_number: Destination fax number.
+            attachments: List of (filename, content, content_type) tuples.
+                At least one attachment is required.
+            request_id: Ambulance request this fax relates to, if any.
+            cover_page_text: Optional cover page text.
+
+        Returns:
+            IncomingFax: Created outbound fax record.
+
+        Raises:
+            FaxProviderException: If the send request fails.
+
+        """
+        result = await self._ringcentral_client.send_fax(
+            to_number=to_number,
+            attachments=attachments,
+            cover_page_text=cover_page_text,
+        )
+        provider_message_id = str(result['id'])
+        message_status = str(result.get('messageStatus', '')).lower()
+        status = (
+            FaxStatus.SENT if message_status == 'sent' else FaxStatus.QUEUED
+        )
+
+        fax = await self._fax_dao.create(
+            provider_message_id=provider_message_id,
+            direction=FaxDirection.OUTBOUND,
+            status=status,
+            to_number=to_number,
+            page_count=result.get('faxPageCount') or result.get('pages'),
+            request_id=request_id,
+        )
+        await self._session.commit()
+        logger.info(
+            'Sent outbound fax %s (message_id=%s) to %s',
+            fax.id,
+            provider_message_id,
+            to_number,
+        )
+        return fax
+
     async def link_fax_to_request(
         self,
         *,

@@ -1,8 +1,7 @@
 """Thin client for the RingCentral fax REST API.
 
-Only the pieces needed for inbound fax intake are implemented so far:
-fetching a message's metadata and downloading its document attachment.
-Outbound sending will be added in a later slice.
+Covers inbound fax intake (fetching a message's metadata and downloading
+its document attachment) and outbound sending.
 
 Field names for message-store responses are based on RingCentral's
 published API documentation; they should be verified against a live
@@ -10,6 +9,7 @@ sandbox response the first time this runs against a real account, since
 RingCentral does not publish a formal JSON schema for this endpoint.
 """
 
+import json
 import logging
 import time
 from typing import Any
@@ -199,6 +199,65 @@ class RingCentralClient:
             'content-type', 'application/octet-stream'
         )
         return response.content, content_type
+
+    async def send_fax(
+        self,
+        *,
+        to_number: str,
+        attachments: list[tuple[str, bytes, str]],
+        cover_page_text: str | None = None,
+    ) -> dict[str, Any]:
+        """Send an outbound fax with one or more attachments.
+
+        RingCentral accepts multiple document formats (PDF, DOC, TIFF,
+        etc.) as attachments and converts/renders them into fax pages
+        server-side, so callers do not need to pre-convert non-PDF
+        documents - each attachment is just passed through as-is.
+
+        Args:
+            to_number: Destination fax number (E.164 format recommended).
+            attachments: List of (filename, content, content_type) tuples.
+                At least one attachment is required.
+            cover_page_text: Optional cover page text.
+
+        Returns:
+            dict: The created fax message resource (includes its id and
+                initial messageStatus, typically "Queued").
+
+        Raises:
+            FaxProviderException: If the send request fails.
+
+        """
+        token = await self._get_access_token()
+
+        files: list[tuple[str, tuple[str | None, bytes | str, str]]] = [
+            (
+                'to',
+                (None, json.dumps({'phoneNumber': to_number}), 'text/json'),
+            ),
+        ]
+        for filename, content, content_type in attachments:
+            files.append(('attachment', (filename, content, content_type)))
+        if cover_page_text:
+            files.append(
+                ('coverPageText', (None, cover_page_text, 'text/plain'))
+            )
+
+        try:
+            response = await self._http_client.post(
+                '/restapi/v1.0/account/~/extension/~/fax',
+                headers={'Authorization': f'Bearer {token}'},
+                files=files,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.exception('RingCentral outbound fax send failed')
+            raise FaxProviderException(  # noqa: TRY003
+                f'Failed to send fax via RingCentral: {exc}'
+            ) from exc
+
+        result: dict[str, Any] = response.json()
+        return result
 
     async def aclose(self) -> None:
         """Close the underlying HTTP client."""

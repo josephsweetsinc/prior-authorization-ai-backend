@@ -206,6 +206,8 @@ class RingCentralSettings(BaseSettings):
         WEBHOOK_SECRET: Shared secret required as a query parameter on the
             inbound webhook URL, since RingCentral does not sign webhook
             request bodies the way some providers do.
+        NOVITAS_FAX_NUMBER: Destination fax number for outbound Novitas
+            prior-authorization package submissions.
 
     """
 
@@ -219,6 +221,7 @@ class RingCentralSettings(BaseSettings):
     SERVER_URL: str = 'https://platform.ringcentral.com'
     FAX_NUMBER: str = ''
     WEBHOOK_SECRET: str = ''
+    NOVITAS_FAX_NUMBER: str = ''
 
 
 class RedisSettings(BaseSettings):

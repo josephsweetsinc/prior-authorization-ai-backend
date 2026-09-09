@@ -1,8 +1,9 @@
-from datetime import date, time
+from datetime import date, datetime, time
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    TIMESTAMP,
     Boolean,
     Date,
     Enum,
@@ -19,6 +20,7 @@ from core.models import BaseIdMixin, BaseTimeStampMixin, SoftDelete
 
 if TYPE_CHECKING:
     from models import RequestFile, User
+    from models.incoming_fax import IncomingFax
 
 
 class TransportationType(StrEnum):
@@ -38,6 +40,25 @@ class RequestStatus(StrEnum):
     DRAFT = 'draft'
     SUBMITTED = 'submitted'
     PENDING = 'pending'
+    APPROVED = 'approved'
+    DENIED = 'denied'
+
+
+class NovitasStatus(StrEnum):
+    """Enumeration of Novitas prior-authorization submission statuses.
+
+    Tracks the external Novitas (Medicare Administrative Contractor)
+    determination separately from this system's own internal
+    RequestStatus (which reflects our admin's internal review, not
+    Novitas's decision). UTN_RECEIVED, APPROVED, DENIED, and
+    ADDITIONAL_INFO_REQUESTED are recorded manually by an admin once
+    known, since Novitas does not expose an API to poll or parse.
+    """
+
+    NOT_SUBMITTED = 'not_submitted'
+    SUBMITTED = 'submitted'
+    UTN_RECEIVED = 'utn_received'
+    ADDITIONAL_INFO_REQUESTED = 'additional_info_requested'
     APPROVED = 'approved'
     DENIED = 'denied'
 
@@ -284,6 +305,31 @@ class AmbulanceRequest(BaseIdMixin, BaseTimeStampMixin, SoftDelete):
         nullable=True,
         comment="Patient's relationship to insured (CMS-1500 Box 6)",
     )
+    utn: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        comment=(
+            'Unique Tracking Number issued by Novitas once a prior '
+            'authorization decision is made (CMS-1500 Box 23)'
+        ),
+    )
+    novitas_status: Mapped['NovitasStatus'] = mapped_column(
+        Enum(NovitasStatus),
+        nullable=False,
+        server_default='NOT_SUBMITTED',
+        comment='Status of the external Novitas prior authorization',
+    )
+    novitas_submitted_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+        comment='When the Novitas PA package was faxed to Novitas',
+    )
+    novitas_fax_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey('incoming_faxes.id', ondelete='SET NULL'),
+        nullable=True,
+        comment='Outbound fax record for the Novitas PA package submission',
+    )
 
     # Relationships
     reviewer: Mapped['User | None'] = relationship(
@@ -299,6 +345,10 @@ class AmbulanceRequest(BaseIdMixin, BaseTimeStampMixin, SoftDelete):
         'RequestFile',
         back_populates='request',
         cascade='all, delete-orphan',
+    )
+    novitas_fax: Mapped['IncomingFax | None'] = relationship(
+        'IncomingFax',
+        foreign_keys=[novitas_fax_id],
     )
 
     @property

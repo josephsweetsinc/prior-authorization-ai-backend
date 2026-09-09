@@ -9,7 +9,11 @@ from fastapi.testclient import TestClient
 
 from dependencies.auth import get_current_user
 from main import app
-from models.ambulance_request import RequestStatus, TransportationType
+from models.ambulance_request import (
+    NovitasStatus,
+    RequestStatus,
+    TransportationType,
+)
 from models.user import UserRole
 
 
@@ -689,6 +693,9 @@ class TestAmbulanceRequestEndpoints:
                 patient_relationship_to_insured=None,
                 denial_reason=None,
                 denial_notes=None,
+                utn=None,
+                novitas_status=NovitasStatus.NOT_SUBMITTED,
+                novitas_submitted_at=None,
                 created_at=datetime(2025, 1, 1, 0, 0, 0),
                 updated_at=datetime(2025, 1, 2, 0, 0, 0),
                 status_history=[
@@ -815,6 +822,9 @@ class TestAmbulanceRequestEndpoints:
                 patient_relationship_to_insured=None,
                 denial_reason=None,
                 denial_notes=None,
+                utn=None,
+                novitas_status=NovitasStatus.NOT_SUBMITTED,
+                novitas_submitted_at=None,
                 created_at=datetime(2025, 1, 1, 0, 0, 0),
                 updated_at=datetime(2025, 1, 2, 0, 0, 0),
                 status_history=[],
@@ -925,3 +935,87 @@ class TestDownloadCms1500PdfEndpoint:
         mock_generate.assert_awaited_once_with(
             request_id=156, user=mock_user
         )
+
+
+class TestSubmitToNovitasEndpoint:
+    """Test suite for the Submit to Novitas endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_submit_to_novitas_success(
+        self,
+        client: TestClient,
+        auth_headers,
+        db_session,
+        user_factory,
+    ):
+        """Test successfully submitting a request to Novitas."""
+        admin = await user_factory(
+            email='novitas-endpoint-admin@example.com', role=UserRole.ADMIN
+        )
+        await db_session.commit()
+
+        from dependencies.auth import get_admin_user_from_token
+
+        async def get_admin_override():
+            return admin
+
+        app.dependency_overrides[get_admin_user_from_token] = (
+            get_admin_override
+        )
+
+        with patch(
+            'services.ambulance_request.AmbulanceRequestService'
+            '.submit_to_novitas',
+            new_callable=AsyncMock,
+        ) as mock_submit:
+            from datetime import datetime
+
+            from schemas.ambulance_request import AmbulanceRequestResponseSchema
+
+            mock_submit.return_value = AmbulanceRequestResponseSchema(
+                id=156,
+                user_id=1,
+                patient_first_name='John',
+                patient_last_name='Doe',
+                primary_diagnosis='Chronic heart failure',
+                status=RequestStatus.APPROVED,
+                pickup_address='123 Main St, Springfield, IL 62701',
+                destination_address='456 Medical Dr, Springfield, IL 62702',
+                transportation_type=TransportationType.AMBULANCE,
+                patient_id='1EG4-TE5-MK72',
+                created_at=datetime(2025, 1, 1, 0, 0, 0),
+                updated_at=datetime(2025, 1, 1, 0, 0, 0),
+                novitas_status=NovitasStatus.SUBMITTED,
+            )
+
+            response = client.post(
+                '/Prod/api/v1/ambulance-request/156/submit-to-novitas',
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data['id'] == 156
+        assert data['novitas_status'] == 'submitted'
+        mock_submit.assert_awaited_once_with(request_id=156, user=admin)
+
+    @pytest.mark.asyncio
+    async def test_submit_to_novitas_requires_admin(
+        self,
+        client: TestClient,
+        auth_headers,
+        mock_user,
+    ):
+        """Test that a non-admin user cannot access the endpoint."""
+
+        async def get_user_override():
+            return mock_user
+
+        app.dependency_overrides[get_current_user] = get_user_override
+
+        response = client.post(
+            '/Prod/api/v1/ambulance-request/156/submit-to-novitas',
+            headers=auth_headers,
+        )
+
+        assert response.status_code in (401, 403, 404)
