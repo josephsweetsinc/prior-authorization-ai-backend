@@ -32,6 +32,7 @@ from schemas.ambulance_request import (
     FileUploadResponseSchema,
     FileUploadWithExtractionResponseSchema,
     RequestWithStatusHistorySchema,
+    UpdateCallSheetDataSchema,
 )
 from schemas.search import SearchRequestsResponseSchema
 from services import AmbulanceRequestService
@@ -305,6 +306,47 @@ async def download_call_sheet_pdf(
         headers={
             'Content-Disposition': f'attachment; filename="{filename}"',
         },
+    )
+
+
+@ambulance_request_router.patch(
+    '/{request_id}/call-sheet-data',
+    description='Save interactively-entered Call Sheet field values',
+    summary='Update Call Sheet data',
+    response_model=dict[str, str],
+)
+@exception_handler
+async def update_call_sheet_data(
+    request_id: int,
+    update_data: UpdateCallSheetDataSchema,
+    user: Annotated[User, Security(get_current_user)],
+    service: Annotated[
+        AmbulanceRequestService, Depends(get_service(AmbulanceRequestService))
+    ],
+) -> dict[str, str]:
+    """Save interactively-entered Call Sheet field values for a request.
+
+    Admin users can update the Call Sheet for any request. Provider
+    users can only update it for their own requests.
+
+    Args:
+        request_id: Request ID to update the Call Sheet for.
+        update_data: Partial map of template field name to value.
+        user: Current authenticated user (admin or provider).
+        service: Ambulance request service.
+
+    Returns:
+        dict[str, str]: The full merged Call Sheet field values.
+
+    Raises:
+        HTTPException: If request not found, permission denied, or an
+            unknown field name is included.
+
+    """
+    return await service.update_call_sheet_data(
+        request_id=request_id,
+        data=update_data.data,
+        user=user,
     )
 
 

@@ -969,6 +969,7 @@ class TestAmbulanceRequestService:
         request.utn = None
         request.novitas_status = NovitasStatus.NOT_SUBMITTED
         request.novitas_submitted_at = None
+        request.call_sheet_data = None
         request.created_at = datetime.now(UTC)
         request.updated_at = datetime.now(UTC)
         request.reviewer_id = None
@@ -1095,6 +1096,128 @@ class TestGenerateCallSheetPdf:
         with pytest.raises(AmbulanceRequestNotFoundException):
             await service.generate_call_sheet_pdf(
                 request_id=999999, user=user
+            )
+
+
+class TestUpdateCallSheetData:
+    """Test suite for AmbulanceRequestService.update_call_sheet_data()."""
+
+    @pytest.fixture
+    def service(self, db_session) -> AmbulanceRequestService:
+        """Create AmbulanceRequestService instance with S3/AI mocked."""
+        return AmbulanceRequestService(
+            db_session=db_session,
+            s3_actions=MagicMock(spec=S3Actions),
+            ai_extraction_service=MagicMock(spec=AIExtractionService),
+        )
+
+    @pytest.mark.asyncio
+    async def test_saves_new_values(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that valid field values are saved."""
+        user = await user_factory()
+        request = await ambulance_request_factory(user_id=user.id)
+        await db_session.commit()
+
+        result = await service.update_call_sheet_data(
+            request_id=request.id,
+            data={'DRIVER': 'Bob Builder', 'Dispatched': '14:32'},
+            user=user,
+        )
+
+        assert result == {'DRIVER': 'Bob Builder', 'Dispatched': '14:32'}
+        await db_session.refresh(request)
+        assert request.call_sheet_data == {
+            'DRIVER': 'Bob Builder',
+            'Dispatched': '14:32',
+        }
+
+    @pytest.mark.asyncio
+    async def test_merges_with_existing_values(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a partial update merges into existing saved data."""
+        user = await user_factory()
+        request = await ambulance_request_factory(user_id=user.id)
+        request.call_sheet_data = {'DRIVER': 'Bob Builder'}
+        await db_session.commit()
+
+        result = await service.update_call_sheet_data(
+            request_id=request.id,
+            data={'Dispatched': '14:32'},
+            user=user,
+        )
+
+        assert result == {'DRIVER': 'Bob Builder', 'Dispatched': '14:32'}
+
+    @pytest.mark.asyncio
+    async def test_unknown_field_name_raises(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a field name not on the template is rejected."""
+        user = await user_factory()
+        request = await ambulance_request_factory(user_id=user.id)
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestInvalidStatusException):
+            await service.update_call_sheet_data(
+                request_id=request.id,
+                data={'NOT_A_REAL_FIELD': 'value'},
+                user=user,
+            )
+
+    @pytest.mark.asyncio
+    async def test_provider_cannot_update_others_request(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a provider cannot update another provider's Call
+        Sheet data.
+        """  # noqa: D205
+        owner = await user_factory(email='cs-owner@example.com')
+        other = await user_factory(email='cs-other@example.com')
+        request = await ambulance_request_factory(user_id=owner.id)
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestPermissionException):
+            await service.update_call_sheet_data(
+                request_id=request.id,
+                data={'DRIVER': 'Bob Builder'},
+                user=other,
+            )
+
+    @pytest.mark.asyncio
+    async def test_not_found_raises(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        db_session,
+    ):
+        """Test that a nonexistent request raises."""
+        user = await user_factory()
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestNotFoundException):
+            await service.update_call_sheet_data(
+                request_id=999999,
+                data={'DRIVER': 'Bob Builder'},
+                user=user,
             )
 
 

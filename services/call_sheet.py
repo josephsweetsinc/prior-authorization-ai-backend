@@ -61,6 +61,11 @@ class CallSheetService:
     def generate_call_sheet_pdf(self, request: AmbulanceRequest) -> bytes:
         """Generate a Call Sheet PDF pre-filled from an ambulance request.
 
+        Fields interactively entered into ``request.call_sheet_data`` take
+        priority; for the handful of fields also derivable from structured
+        request data (patient name, origin, etc.), that data is used as a
+        fallback when no interactive value has been entered yet.
+
         Args:
             request: AmbulanceRequest instance to source field values from.
 
@@ -76,16 +81,23 @@ class CallSheetService:
                 f'Call Sheet template not found at {self._template_path}'
             )
 
+        call_sheet_data = request.call_sheet_data or {}
+
         doc = fitz.open(self._template_path)
         try:
             filled_count = 0
             for page_num in range(doc.page_count):
                 page = doc[page_num]
                 for widget in page.widgets() or []:  # type: ignore[attr-defined]
-                    getter = FIELD_VALUE_GETTERS.get(widget.field_name)
-                    if getter is None:
+                    if widget.field_type_string in ('Signature', 'Button'):
                         continue
-                    widget.field_value = getter(request)
+                    value = call_sheet_data.get(widget.field_name)
+                    if not value:
+                        getter = FIELD_VALUE_GETTERS.get(widget.field_name)
+                        value = getter(request) if getter else None
+                    if not value:
+                        continue
+                    widget.field_value = value
                     widget.update()
                     filled_count += 1
             pdf_bytes: bytes = doc.tobytes()
@@ -100,3 +112,33 @@ class CallSheetService:
             len(pdf_bytes),
         )
         return pdf_bytes
+
+    def get_editable_field_names(self) -> frozenset[str]:
+        """Get the template's field names that can be set interactively.
+
+        Excludes Signature and Button widgets, which aren't meaningful to
+        set from a plain text value.
+
+        Returns:
+            frozenset[str]: Valid keys for ``AmbulanceRequest.call_sheet_data``.
+
+        Raises:
+            FileNotFoundError: If the template PDF is missing.
+
+        """
+        if not self._template_path.exists():
+            raise FileNotFoundError(  # noqa: TRY003
+                f'Call Sheet template not found at {self._template_path}'
+            )
+
+        doc = fitz.open(self._template_path)
+        try:
+            names = {
+                widget.field_name
+                for page_num in range(doc.page_count)
+                for widget in (doc[page_num].widgets() or [])  # type: ignore[attr-defined]
+                if widget.field_type_string not in ('Signature', 'Button')
+            }
+        finally:
+            doc.close()
+        return frozenset(names)

@@ -696,6 +696,7 @@ class TestAmbulanceRequestEndpoints:
                 utn=None,
                 novitas_status=NovitasStatus.NOT_SUBMITTED,
                 novitas_submitted_at=None,
+                call_sheet_data=None,
                 created_at=datetime(2025, 1, 1, 0, 0, 0),
                 updated_at=datetime(2025, 1, 2, 0, 0, 0),
                 status_history=[
@@ -825,6 +826,7 @@ class TestAmbulanceRequestEndpoints:
                 utn=None,
                 novitas_status=NovitasStatus.NOT_SUBMITTED,
                 novitas_submitted_at=None,
+                call_sheet_data=None,
                 created_at=datetime(2025, 1, 1, 0, 0, 0),
                 updated_at=datetime(2025, 1, 2, 0, 0, 0),
                 status_history=[],
@@ -894,6 +896,43 @@ class TestDownloadCallSheetPdfEndpoint:
         assert response.content == b'%PDF-fake-call-sheet-content'
         mock_generate.assert_awaited_once_with(
             request_id=156, user=mock_user
+        )
+
+
+class TestUpdateCallSheetDataEndpoint:
+    """Test suite for the Call Sheet data PATCH endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_update_call_sheet_data_success(
+        self,
+        client: TestClient,
+        auth_headers,
+        mock_user,
+    ):
+        """Test successfully saving Call Sheet field values."""
+
+        async def get_user_override():
+            return mock_user
+
+        app.dependency_overrides[get_current_user] = get_user_override
+
+        with patch(
+            'services.ambulance_request.AmbulanceRequestService'
+            '.update_call_sheet_data',
+            new_callable=AsyncMock,
+        ) as mock_update:
+            mock_update.return_value = {'DRIVER': 'Bob Builder'}
+
+            response = client.patch(
+                '/Prod/api/v1/ambulance-request/156/call-sheet-data',
+                json={'data': {'DRIVER': 'Bob Builder'}},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        assert response.json() == {'DRIVER': 'Bob Builder'}
+        mock_update.assert_awaited_once_with(
+            request_id=156, data={'DRIVER': 'Bob Builder'}, user=mock_user
         )
 
 

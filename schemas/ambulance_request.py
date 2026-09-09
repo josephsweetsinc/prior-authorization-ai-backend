@@ -490,6 +490,16 @@ class AmbulanceRequestResponseSchema(BaseModel):
             description='When the Novitas PA package was faxed to Novitas',
         ),
     ]
+    call_sheet_data: Annotated[
+        dict[str, str] | None,
+        Field(
+            default=None,
+            description=(
+                'Interactively-entered Call Sheet field values, keyed by '
+                'the template field name'
+            ),
+        ),
+    ]
     created_at: datetime
     updated_at: datetime
 
@@ -613,6 +623,7 @@ class AdminRequestWithStatusHistorySchema(BaseModel):
     utn: str | None
     novitas_status: NovitasStatus
     novitas_submitted_at: datetime | None
+    call_sheet_data: dict[str, str] | None
     created_at: datetime
     updated_at: datetime
     status_history: list[RequestStatusHistoryResponseSchema] = []
@@ -681,6 +692,21 @@ class DenyRequestSchema(BaseModel):
             and not self.denial_notes
         ):
             raise ValueError(DENIAL_NOTES_REQUIRED_MSG)
+
+
+class UpdateCallSheetDataSchema(BaseModel):
+    """Schema for saving interactively-entered Call Sheet field values."""
+
+    data: Annotated[
+        dict[str, str],
+        Field(
+            description=(
+                'Partial map of Call Sheet template field name to value, '
+                'merged into any previously saved values.'
+            ),
+            examples=[{'Dispatched': '14:32', 'Chief ComplaintsRow1': 'X'}],
+        ),
+    ]
 
 
 class AdminUpdateRequestSchema(BaseModel):

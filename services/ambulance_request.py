@@ -675,6 +675,7 @@ class AmbulanceRequestService(BaseService):
                 utn=request.utn,
                 novitas_status=request.novitas_status,
                 novitas_submitted_at=request.novitas_submitted_at,
+                call_sheet_data=request.call_sheet_data,
                 created_at=request.created_at,
                 updated_at=request.updated_at,
                 status_history=status_history_schemas,
@@ -696,6 +697,7 @@ class AmbulanceRequestService(BaseService):
             utn=request.utn,
             novitas_status=request.novitas_status,
             novitas_submitted_at=request.novitas_submitted_at,
+            call_sheet_data=request.call_sheet_data,
             created_at=request.created_at,
             updated_at=request.updated_at,
             status_history=status_history_schemas,
@@ -1487,6 +1489,7 @@ Necessity document, or "NO" if it is not."""
             utn=request.utn,
             novitas_status=request.novitas_status,
             novitas_submitted_at=request.novitas_submitted_at,
+            call_sheet_data=request.call_sheet_data,
             created_at=request.created_at,
             updated_at=request.updated_at,
             status_history=status_history_schemas,
@@ -1597,6 +1600,59 @@ Necessity document, or "NO" if it is not."""
         )
 
         return pdf_bytes
+
+    async def update_call_sheet_data(
+        self,
+        request_id: int,
+        data: dict[str, str],
+        user: User,
+    ) -> dict[str, str]:
+        """Merge interactively-entered values into a request's Call Sheet.
+
+        Used by the "eyeball check" console so an admin can fill in the
+        Call Sheet's operational fields (vitals, times, chief complaints,
+        etc.) before approving, instead of only being able to fill them
+        by hand on the printed PDF.
+
+        Args:
+            request_id: ID of the request to update.
+            data: Partial map of Call Sheet template field name to value.
+            user: Current authenticated user.
+
+        Returns:
+            dict[str, str]: The full merged call_sheet_data after saving.
+
+        Raises:
+            AmbulanceRequestNotFoundException: If request not found.
+            AmbulanceRequestPermissionException: If user doesn't have
+                permission.
+            AmbulanceRequestInvalidStatusException: If any field name is
+                not part of the Call Sheet template.
+
+        """
+        request = await self._request_dao.get_by_id(request_id=request_id)
+        if not request:
+            raise AmbulanceRequestNotFoundException
+
+        if request.user_id != user.id and user.role != UserRole.ADMIN:
+            raise AmbulanceRequestPermissionException
+
+        valid_field_names = self._call_sheet_service.get_editable_field_names()
+        unknown_fields = set(data) - valid_field_names
+        if unknown_fields:
+            raise AmbulanceRequestInvalidStatusException(  # noqa: TRY003
+                f'Unknown Call Sheet field(s): '
+                f'{", ".join(sorted(unknown_fields))}'
+            )
+
+        merged = dict(request.call_sheet_data or {})
+        merged.update(data)
+        request.call_sheet_data = merged
+        await self._session.flush()
+        await self._session.commit()
+        await self._session.refresh(request)
+
+        return request.call_sheet_data or {}
 
     async def generate_cms1500_pdf(
         self,

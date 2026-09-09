@@ -3,6 +3,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    JSON,
     TIMESTAMP,
     Boolean,
     Date,
@@ -14,6 +15,7 @@ from sqlalchemy import (
     Text,
     Time,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.models import BaseIdMixin, BaseTimeStampMixin, SoftDelete
@@ -21,6 +23,9 @@ from core.models import BaseIdMixin, BaseTimeStampMixin, SoftDelete
 if TYPE_CHECKING:
     from models import RequestFile, User
     from models.incoming_fax import IncomingFax
+
+# JSONB on Postgres (production), generic JSON elsewhere (SQLite in tests).
+CALL_SHEET_DATA_TYPE = JSON().with_variant(JSONB(), 'postgresql')
 
 
 class TransportationType(StrEnum):
@@ -329,6 +334,16 @@ class AmbulanceRequest(BaseIdMixin, BaseTimeStampMixin, SoftDelete):
         ForeignKey('incoming_faxes.id', ondelete='SET NULL'),
         nullable=True,
         comment='Outbound fax record for the Novitas PA package submission',
+    )
+    call_sheet_data: Mapped[dict[str, str] | None] = mapped_column(
+        CALL_SHEET_DATA_TYPE,
+        nullable=True,
+        comment=(
+            'Values for the Masters Ambulance Call Sheet AcroForm fields, '
+            'keyed by the template field name (e.g. "Dispatched", '
+            '"Chief ComplaintsRow1"), filled in interactively before the '
+            'PDF is generated'
+        ),
     )
 
     # Relationships
