@@ -1,13 +1,17 @@
 """Tests for FaxService."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from dao import IncomingFaxDAO
 from exceptions import FaxNotFoundException
 from models.incoming_fax import FaxDirection, FaxStatus
-from services.fax.fax_service import FaxService, extract_fax_message_ids
+from services.fax.fax_service import (
+    FaxService,
+    _get_shared_ringcentral_client,
+    extract_fax_message_ids,
+)
 from services.fax.ringcentral_client import RingCentralClient
 
 
@@ -30,6 +34,20 @@ class TestExtractFaxMessageIds:
         """Test that a payload with no changes returns an empty list."""
         assert extract_fax_message_ids({'body': {}}) == []
         assert extract_fax_message_ids({}) == []
+
+
+class TestSharedRingCentralClient:
+    """Test suite for _get_shared_ringcentral_client()."""
+
+    def test_returns_same_instance(self):
+        """Test that the same RingCentralClient instance is reused, so
+        its underlying httpx connection pool isn't re-created per
+        request.
+        """  # noqa: D205
+        assert (
+            _get_shared_ringcentral_client()
+            is _get_shared_ringcentral_client()
+        )
 
 
 class TestFaxService:
@@ -129,6 +147,28 @@ class TestFaxService:
 
         assert fax is not None
         assert fax.status == FaxStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_process_inbound_message_no_attachment_commits(
+        self, service, mock_ringcentral_client, db_session
+    ):
+        """Test that the FAILED record for a missing attachment is
+        committed, not just flushed - otherwise it disappears once the
+        request's session closes.
+        """  # noqa: D205
+        mock_ringcentral_client.get_message = AsyncMock(
+            return_value={
+                'from': {'phoneNumber': '+15551234567'},
+                'to': [],
+                'attachments': [],
+            }
+        )
+        with patch.object(
+            db_session, 'commit', wraps=db_session.commit
+        ) as mock_commit:
+            await service.process_inbound_message('rc-msg-empty-commit')
+
+        mock_commit.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_process_webhook_payload_processes_all_fax_ids(

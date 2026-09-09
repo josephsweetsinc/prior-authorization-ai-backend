@@ -2,6 +2,7 @@
 
 import io
 import logging
+from functools import lru_cache
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +21,17 @@ from services.fax.ringcentral_client import RingCentralClient
 logger = logging.getLogger(__name__)
 
 FAX_STORAGE_PREFIX = 'faxes/inbound'
+
+
+@lru_cache(maxsize=1)
+def _get_shared_ringcentral_client() -> RingCentralClient:
+    """Get a process-wide RingCentralClient singleton.
+
+    RingCentralClient owns an httpx.AsyncClient connection pool that is
+    never explicitly closed, so it must not be re-created per request -
+    FaxService is instantiated fresh on every request via get_service().
+    """
+    return RingCentralClient()
 
 
 def extract_fax_message_ids(payload: dict[str, Any]) -> list[str]:
@@ -68,7 +80,9 @@ class FaxService(BaseService):
         super().__init__(db_session)
         self._fax_dao = fax_dao or IncomingFaxDAO(db_session)
         self._s3_actions = s3_actions or S3Actions()
-        self._ringcentral_client = ringcentral_client or RingCentralClient()
+        self._ringcentral_client = (
+            ringcentral_client or _get_shared_ringcentral_client()
+        )
 
     async def process_webhook_payload(
         self,
@@ -149,7 +163,7 @@ class FaxService(BaseService):
             logger.warning(
                 'Fax message %s has no document attachment', message_id
             )
-            return await self._fax_dao.create(
+            fax = await self._fax_dao.create(
                 provider_message_id=message_id,
                 direction=FaxDirection.INBOUND,
                 status=FaxStatus.FAILED,
@@ -157,6 +171,8 @@ class FaxService(BaseService):
                 to_number=to_number,
                 page_count=page_count,
             )
+            await self._session.commit()
+            return fax
 
         content, content_type = (
             await self._ringcentral_client.download_attachment(

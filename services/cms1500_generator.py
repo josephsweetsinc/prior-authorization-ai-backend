@@ -412,7 +412,7 @@ class CMS1500GeneratorService:
         story.append(Paragraph('5. PRIOR AUTHORIZATION', section_style))
         prior_auth_data = create_field(
             'PRIOR AUTHORIZATION NUMBER (BOX 23)',
-            None,
+            request.utn,
         )
         s5_table = Table([[prior_auth_data]], colWidths=[available_width])
         s5_table.setStyle(

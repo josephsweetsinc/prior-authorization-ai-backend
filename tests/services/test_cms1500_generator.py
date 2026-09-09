@@ -34,6 +34,7 @@ def _make_request(**overrides):
         'ordering_physician': 'Dr. Jane Smith',
         'ordering_physician_npi': '1234567893',
         'physician_phone': '555-123-4567',
+        'utn': None,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -107,6 +108,17 @@ class TestCMS1500GeneratorService:
         text = _extract_text(pdf_bytes)
 
         assert 'N/A' in text
+
+    def test_generate_includes_utn_once_issued(
+        self, service: CMS1500GeneratorService
+    ):
+        """Test that Box 23 renders the UTN once Novitas has issued one."""
+        request = _make_request(utn='A1234B5678C9')
+
+        pdf_bytes = service.generate_cms1500_pdf(request)
+        text = _extract_text(pdf_bytes)
+
+        assert 'A1234B5678C9' in text
 
     def test_generate_fits_on_one_page(
         self, service: CMS1500GeneratorService
