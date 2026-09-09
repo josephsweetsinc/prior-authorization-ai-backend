@@ -1630,7 +1630,12 @@ Necessity document, or "NO" if it is not."""
                 not part of the Call Sheet template.
 
         """
-        request = await self._request_dao.get_by_id(request_id=request_id)
+        # Locks the row for the rest of this transaction so two concurrent
+        # saves (e.g. two admin tabs) can't each read the same base dict
+        # and silently drop each other's merged keys on commit.
+        request = await self._request_dao.get_by_id_for_update(
+            request_id=request_id
+        )
         if not request:
             raise AmbulanceRequestNotFoundException
 

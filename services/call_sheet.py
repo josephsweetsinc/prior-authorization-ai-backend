@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import Callable
+from functools import lru_cache
 from pathlib import Path
 
 import fitz
@@ -36,6 +37,34 @@ FIELD_VALUE_GETTERS: dict[str, Callable[[AmbulanceRequest], str]] = {
     ),
     'ORDERED BY': lambda r: r.ordering_physician or '',
 }
+
+
+@lru_cache(maxsize=8)
+def _read_editable_field_names(template_path: str) -> frozenset[str]:
+    """Read the template's editable field names, cached by path.
+
+    The template is a static bundled asset that doesn't change at
+    runtime, so re-parsing it on every request (this is called on every
+    Call Sheet data save) would be wasted, blocking PDF I/O.
+
+    Args:
+        template_path: Path to the fillable PDF template.
+
+    Returns:
+        frozenset[str]: Valid keys for ``AmbulanceRequest.call_sheet_data``.
+
+    """
+    doc = fitz.open(template_path)
+    try:
+        names = {
+            widget.field_name
+            for page_num in range(doc.page_count)
+            for widget in (doc[page_num].widgets() or [])  # type: ignore[attr-defined]
+            if widget.field_type_string not in ('Signature', 'Button')
+        }
+    finally:
+        doc.close()
+    return frozenset(names)
 
 
 class CallSheetService:
@@ -91,8 +120,13 @@ class CallSheetService:
                 for widget in page.widgets() or []:  # type: ignore[attr-defined]
                     if widget.field_type_string in ('Signature', 'Button'):
                         continue
-                    value = call_sheet_data.get(widget.field_name)
-                    if not value:
+                    value: str | None
+                    if widget.field_name in call_sheet_data:
+                        # Present (even if empty) means the admin has
+                        # explicitly set/cleared this field - honor that
+                        # rather than falling back to the derived value.
+                        value = call_sheet_data[widget.field_name]
+                    else:
                         getter = FIELD_VALUE_GETTERS.get(widget.field_name)
                         value = getter(request) if getter else None
                     if not value:
@@ -130,15 +164,4 @@ class CallSheetService:
             raise FileNotFoundError(  # noqa: TRY003
                 f'Call Sheet template not found at {self._template_path}'
             )
-
-        doc = fitz.open(self._template_path)
-        try:
-            names = {
-                widget.field_name
-                for page_num in range(doc.page_count)
-                for widget in (doc[page_num].widgets() or [])  # type: ignore[attr-defined]
-                if widget.field_type_string not in ('Signature', 'Button')
-            }
-        finally:
-            doc.close()
-        return frozenset(names)
+        return _read_editable_field_names(str(self._template_path))

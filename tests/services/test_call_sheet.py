@@ -134,6 +134,19 @@ class TestCallSheetService:
         values = _read_field_values(pdf_bytes)
         assert values['PATIENT NAME'] == 'Corrected Name'
 
+    def test_generate_explicit_empty_value_is_not_overridden_by_derived(
+        self, service: CallSheetService
+    ):
+        """Test that explicitly clearing one of the five known fields
+        leaves it blank, instead of falling back to the derived value.
+        """  # noqa: D205
+        request = _make_request(call_sheet_data={'PATIENT NAME': ''})
+
+        pdf_bytes = service.generate_call_sheet_pdf(request)
+
+        values = _read_field_values(pdf_bytes)
+        assert values['PATIENT NAME'] == ''
+
     def test_get_editable_field_names_excludes_signatures_and_buttons(
         self, service: CallSheetService
     ):

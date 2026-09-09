@@ -150,6 +150,37 @@ class AmbulanceRequestDAO(BaseDAO):
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_by_id_for_update(
+        self,
+        request_id: int,
+    ) -> AmbulanceRequest | None:
+        """Get request by id, locking the row for the rest of the transaction.
+
+        Used for read-modify-write updates to a single column (e.g.
+        merging into the call_sheet_data JSON blob) where two concurrent
+        writers could otherwise silently drop each other's changes. Not
+        supported by SQLite (used in tests); SQLAlchemy's SQLite dialect
+        just omits the locking clause there, so it's safe to call in any
+        environment, but only actually locks on Postgres.
+
+        Args:
+            request_id: Request ID.
+
+        Returns:
+            AmbulanceRequest | None: Request instance or None if not found.
+
+        """
+        stmt = (
+            select(AmbulanceRequest)
+            .where(
+                AmbulanceRequest.id == request_id,
+                AmbulanceRequest.is_active.is_(True),
+            )
+            .with_for_update()
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     def _build_filter_stmt(
         self,
         *,
