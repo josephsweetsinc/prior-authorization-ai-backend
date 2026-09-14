@@ -211,6 +211,14 @@ class FaxService(BaseService):
             message_id,
             from_number,
         )
+
+        # Lazy import to avoid a circular dependency: tasks.fax_processing
+        # imports AmbulanceRequestService, which imports FaxService.
+        from tasks.fax_processing import (  # noqa: PLC0415
+            process_inbound_fax,
+        )
+
+        process_inbound_fax.delay(fax.id)
         return fax
 
     async def get_fax(self, fax_id: int) -> IncomingFaxResponseSchema:
@@ -329,14 +337,16 @@ class FaxService(BaseService):
         *,
         fax_id: int,
         request_id: int,
-        matched_by_user_id: int,
+        matched_by_user_id: int | None,
     ) -> IncomingFaxResponseSchema:
-        """Manually link an unresolved fax to an ambulance request.
+        """Link a fax to an ambulance request, manually or automatically.
 
         Args:
             fax_id: ID of the fax to link.
             request_id: ID of the ambulance request to link to.
-            matched_by_user_id: ID of the admin user performing the link.
+            matched_by_user_id: ID of the admin user performing the link,
+                or None for an automated match (e.g. AI-drafted from the
+                fax itself).
 
         Returns:
             IncomingFaxResponseSchema: Updated fax.

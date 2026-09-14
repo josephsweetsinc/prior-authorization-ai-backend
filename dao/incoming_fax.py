@@ -138,6 +138,30 @@ class IncomingFaxDAO(BaseDAO):
         result = await self._session.execute(stmt)
         return list(result.scalars().all()), total
 
+    async def update_status(
+        self,
+        *,
+        fax_id: int,
+        status: FaxStatus,
+    ) -> IncomingFax | None:
+        """Update a fax's processing status.
+
+        Args:
+            fax_id: ID of the fax to update.
+            status: New processing status.
+
+        Returns:
+            IncomingFax | None: Updated fax, or None if not found.
+
+        """
+        fax = await self.get_by_id(fax_id)
+        if not fax:
+            return None
+        fax.status = status
+        await self._session.flush()
+        await self._session.refresh(fax)
+        return fax
+
     async def link_to_request(
         self,
         *,

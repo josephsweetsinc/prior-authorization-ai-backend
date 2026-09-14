@@ -53,6 +53,17 @@ class TestSharedRingCentralClient:
 class TestFaxService:
     """Test suite for FaxService."""
 
+    @pytest.fixture(autouse=True)
+    def mock_process_inbound_fax_task(self):
+        """Prevent process_inbound_message from enqueueing a real Celery
+        task, which would try to reach a Redis broker that isn't
+        available in tests.
+        """  # noqa: D205
+        with patch(
+            'tasks.fax_processing.process_inbound_fax.delay'
+        ) as mock_delay:
+            yield mock_delay
+
     @pytest.fixture
     def mock_s3_actions(self) -> MagicMock:
         """Create mock S3Actions."""
@@ -101,7 +112,11 @@ class TestFaxService:
 
     @pytest.mark.asyncio
     async def test_process_inbound_message_success(
-        self, service, mock_s3_actions, mock_ringcentral_client
+        self,
+        service,
+        mock_s3_actions,
+        mock_ringcentral_client,
+        mock_process_inbound_fax_task,
     ):
         """Test successfully processing a new inbound fax message."""
         fax = await service.process_inbound_message('rc-msg-1')
@@ -116,23 +131,26 @@ class TestFaxService:
         mock_ringcentral_client.download_attachment.assert_awaited_once_with(
             message_id='rc-msg-1', attachment_id='att-1'
         )
+        mock_process_inbound_fax_task.assert_called_once_with(fax.id)
 
     @pytest.mark.asyncio
     async def test_process_inbound_message_idempotent(
-        self, service, mock_ringcentral_client
+        self, service, mock_ringcentral_client, mock_process_inbound_fax_task
     ):
         """Test that reprocessing the same message ID is a no-op."""
         first = await service.process_inbound_message('rc-msg-dup')
         mock_ringcentral_client.get_message.reset_mock()
+        mock_process_inbound_fax_task.reset_mock()
 
         second = await service.process_inbound_message('rc-msg-dup')
 
         assert second.id == first.id
         mock_ringcentral_client.get_message.assert_not_called()
+        mock_process_inbound_fax_task.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_process_inbound_message_no_attachment(
-        self, service, mock_ringcentral_client
+        self, service, mock_ringcentral_client, mock_process_inbound_fax_task
     ):
         """Test that a message with no attachments is marked FAILED."""
         mock_ringcentral_client.get_message = AsyncMock(
@@ -147,6 +165,7 @@ class TestFaxService:
 
         assert fax is not None
         assert fax.status == FaxStatus.FAILED
+        mock_process_inbound_fax_task.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_process_inbound_message_no_attachment_commits(

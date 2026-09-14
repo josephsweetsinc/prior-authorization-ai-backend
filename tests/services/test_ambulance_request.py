@@ -1,14 +1,15 @@
 """Tests for AmbulanceRequestService."""
 
-from datetime import date, time, datetime, UTC
+from datetime import UTC, date, datetime, time
 from io import BytesIO
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import UploadFile
 
 from config.settings import Settings
 from dao import (
+    IncomingFaxDAO,
     RequestFileDAO,
     RequestStatusHistoryDAO,
 )
@@ -16,7 +17,6 @@ from exceptions import (
     AmbulanceRequestAllFilesUploadFailedException,
     AmbulanceRequestEmptyDocumentEmtpyException,
     AmbulanceRequestEmptyDocumentFileNameException,
-    AmbulanceRequestInvalidFileIdsException,
     AmbulanceRequestInvalidStatusException,
     AmbulanceRequestNotFoundException,
     AmbulanceRequestPDFGenerationException,
@@ -28,7 +28,12 @@ from models.ambulance_request import (
     RequestStatus,
     TransportationType,
 )
+from models.incoming_fax import FaxStatus
 from models.user import UserRole
+from schemas.ai_extraction import (
+    AIExtractionResponse,
+    ExtractedTransportationData,
+)
 from schemas.ambulance_request import CreateAmbulanceRequestSchema
 from services.ai.extractor import AIExtractionService
 from services.ambulance_request import AmbulanceRequestService
@@ -591,7 +596,9 @@ class TestAmbulanceRequestService:
             await db_session.commit()
 
             # Create draft
-            from schemas.ambulance_request import CreateAmbulanceRequestParseSchema
+            from schemas.ambulance_request import (
+                CreateAmbulanceRequestParseSchema,
+            )
 
             parse_data = CreateAmbulanceRequestParseSchema(file_ids=file_ids)
             draft_result = await service.create_request_with_extraction(
@@ -692,7 +699,9 @@ class TestAmbulanceRequestService:
             await db_session.commit()
 
             # Create draft
-            from schemas.ambulance_request import CreateAmbulanceRequestParseSchema
+            from schemas.ambulance_request import (
+                CreateAmbulanceRequestParseSchema,
+            )
 
             parse_data = CreateAmbulanceRequestParseSchema(file_ids=file_ids)
             draft_result = await service.create_request_with_extraction(
@@ -760,7 +769,9 @@ class TestAmbulanceRequestService:
             # Use letters only for first name (pattern requires ^[a-zA-Z]+$)
             first_names = ['John', 'Jane', 'Bob', 'Alice', 'Charlie']
             # Create draft
-            from schemas.ambulance_request import CreateAmbulanceRequestParseSchema
+            from schemas.ambulance_request import (
+                CreateAmbulanceRequestParseSchema,
+            )
 
             parse_data = CreateAmbulanceRequestParseSchema(file_ids=file_ids)
             draft_result = await service.create_request_with_extraction(
@@ -982,7 +993,10 @@ class TestAmbulanceRequestService:
         service._file_dao.get_by_request_id.return_value = []
 
         # Mock get_completion_status
-        from schemas.ambulance_request import CompletionStatus, CompletionStatusSchema
+        from schemas.ambulance_request import (
+            CompletionStatus,
+            CompletionStatusSchema,
+        )
         mock_completion_status = CompletionStatusSchema(
             overall_status=CompletionStatus.COMPLETE,
             missing_fields=[],
@@ -1219,6 +1233,175 @@ class TestUpdateCallSheetData:
                 data={'DRIVER': 'Bob Builder'},
                 user=user,
             )
+
+
+class TestCreateDraftRequestFromFax:
+    """Test suite for AmbulanceRequestService.create_draft_request_from_fax()."""  # noqa: E501
+
+    @pytest.fixture
+    def mock_ai_service_success(self) -> MagicMock:
+        """Create a mock AIExtractionService reporting a successful
+        extraction.
+        """  # noqa: D205
+        mock = MagicMock(spec=AIExtractionService)
+        mock.extract_data_from_files = AsyncMock(
+            return_value=AIExtractionResponse(
+                extracted_data=ExtractedTransportationData(
+                    patient_first_name='John',
+                    patient_last_name='Doe',
+                    patient_date_of_birth=date(1980, 1, 1),
+                    patient_id='DA123456789HY',
+                    pickup_address='123 Main St',
+                    destination_address='456 Medical Dr',
+                ),
+                extraction_metadata={
+                    'status': 'success',
+                    'files_processed': '1',
+                },
+            )
+        )
+        return mock
+
+    @pytest.fixture
+    def mock_ai_service_failure(self) -> MagicMock:
+        """Create a mock AIExtractionService reporting a failed
+        extraction.
+        """  # noqa: D205
+        mock = MagicMock(spec=AIExtractionService)
+        mock.extract_data_from_files = AsyncMock(
+            return_value=AIExtractionResponse(
+                extracted_data=ExtractedTransportationData(),
+                extraction_metadata={'status': 'error'},
+            )
+        )
+        return mock
+
+    def _make_service(
+        self, db_session, mock_ai_service
+    ) -> AmbulanceRequestService:
+        return AmbulanceRequestService(
+            db_session=db_session,
+            s3_actions=MagicMock(spec=S3Actions),
+            ai_extraction_service=mock_ai_service,
+        )
+
+    @pytest.mark.asyncio
+    async def test_creates_draft_and_marks_matched(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_success,
+    ):
+        """Test that a successful extraction creates a DRAFT request
+        owned by an admin and marks the fax MATCHED.
+        """  # noqa: D205
+        admin = await user_factory(
+            email='admin@example.com', role=UserRole.ADMIN
+        )
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-1',
+            s3_key='faxes/inbound/rc-draft-1.pdf',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(fax.id)
+
+        assert draft is not None
+        assert draft.status == RequestStatus.DRAFT
+        assert draft.user_id == admin.id
+        assert draft.patient_first_name == 'John'
+        assert draft.patient_last_name == 'Doe'
+
+        await db_session.refresh(fax)
+        assert fax.status.value == 'matched'
+        assert fax.request_id == draft.id
+        assert fax.matched_by_user_id is None
+
+    @pytest.mark.asyncio
+    async def test_extraction_failure_marks_unresolved(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_failure,
+    ):
+        """Test that a failed extraction leaves no draft and marks the
+        fax UNRESOLVED.
+        """  # noqa: D205
+        await user_factory(email='admin@example.com', role=UserRole.ADMIN)
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-2',
+            s3_key='faxes/inbound/rc-draft-2.pdf',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_failure)
+        draft = await service.create_draft_request_from_fax(fax.id)
+
+        assert draft is None
+        await db_session.refresh(fax)
+        assert fax.status.value == 'unresolved'
+
+    @pytest.mark.asyncio
+    async def test_no_admin_marks_unresolved(
+        self,
+        db_session,
+        mock_ai_service_success,
+    ):
+        """Test that with no admin user to own the draft, the fax is
+        marked UNRESOLVED instead of raising.
+        """  # noqa: D205
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-3',
+            s3_key='faxes/inbound/rc-draft-3.pdf',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(fax.id)
+
+        assert draft is None
+        await db_session.refresh(fax)
+        assert fax.status.value == 'unresolved'
+
+    @pytest.mark.asyncio
+    async def test_not_received_is_noop(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_success,
+    ):
+        """Test that a fax not at RECEIVED (e.g. already processed by
+        an earlier task delivery) is left untouched.
+        """  # noqa: D205
+        await user_factory(email='admin@example.com', role=UserRole.ADMIN)
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-4',
+            s3_key='faxes/inbound/rc-draft-4.pdf',
+            status=FaxStatus.MATCHED,
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(fax.id)
+
+        assert draft is None
+        mock_ai_service_success.extract_data_from_files.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_fax_is_noop(
+        self,
+        db_session,
+        mock_ai_service_success,
+    ):
+        """Test that a nonexistent fax_id returns None without error."""
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(999999)
+        assert draft is None
 
 
 class TestGenerateCms1500Pdf:

@@ -104,3 +104,25 @@ class TestIncomingFaxDAO:
             matched_by_user_id=1,
         )
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_update_status(self, fax_dao, db_session):
+        """Test updating a fax's processing status."""
+        fax = await fax_dao.create(provider_message_id='rc-status')
+        await db_session.commit()
+
+        updated = await fax_dao.update_status(
+            fax_id=fax.id, status=FaxStatus.PROCESSING
+        )
+        await db_session.commit()
+
+        assert updated is not None
+        assert updated.status == FaxStatus.PROCESSING
+
+    @pytest.mark.asyncio
+    async def test_update_status_not_found(self, fax_dao):
+        """Test that updating a nonexistent fax returns None."""
+        result = await fax_dao.update_status(
+            fax_id=999999, status=FaxStatus.UNRESOLVED
+        )
+        assert result is None

@@ -1,6 +1,7 @@
 import logging
 from datetime import UTC, datetime, time
 from io import BytesIO
+from typing import Any
 
 from fastapi import UploadFile
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -10,6 +11,7 @@ from config.settings import Settings
 from core import BaseService
 from dao import (
     AmbulanceRequestDAO,
+    IncomingFaxDAO,
     RequestFileDAO,
     RequestStatusHistoryDAO,
     UserDAO,
@@ -39,6 +41,7 @@ from models.ambulance_request import (
     NovitasStatus,
     TransportationType,
 )
+from models.incoming_fax import FaxStatus
 from schemas import (
     AdminRequestWithStatusHistorySchema,
     AdminUpdateRequestSchema,
@@ -55,6 +58,7 @@ from schemas import (
     RequestStatusHistoryResponseSchema,
     RequestWithStatusHistorySchema,
 )
+from schemas.ai_extraction import ExtractedTransportationData
 from services.ai.extractor import AIExtractionService
 from services.aws.actions import S3Actions
 from services.call_sheet import CallSheetService
@@ -86,6 +90,7 @@ class AmbulanceRequestService(BaseService):
         request_dao: AmbulanceRequestDAO | None = None,
         file_dao: RequestFileDAO | None = None,
         status_history_dao: RequestStatusHistoryDAO | None = None,
+        incoming_fax_dao: IncomingFaxDAO | None = None,
         s3_actions: S3Actions | None = None,
         ai_extraction_service: AIExtractionService | None = None,
         notification_service: NotificationService | None = None,
@@ -102,6 +107,7 @@ class AmbulanceRequestService(BaseService):
         self._status_history_dao = (
             status_history_dao or RequestStatusHistoryDAO(db_session)
         )
+        self._incoming_fax_dao = incoming_fax_dao or IncomingFaxDAO(db_session)
         self._s3_actions = s3_actions or S3Actions()
         self._ai_extraction_service = (
             ai_extraction_service
@@ -256,6 +262,59 @@ class AmbulanceRequestService(BaseService):
         """
         return await self._extract_s3_keys(files=files, user_id=user_id)
 
+    @staticmethod
+    def _build_draft_request_kwargs(
+        extracted: ExtractedTransportationData,
+        *,
+        user_id: int,
+    ) -> dict[str, Any]:
+        """Build AmbulanceRequestDAO.create() kwargs from extracted data.
+
+        Fills in placeholder defaults for required fields the AI could
+        not extract, so a draft can always be created for review rather
+        than blocking on missing data.
+
+        Args:
+            extracted: Structured data extracted by the AI service.
+            user_id: ID of the user the draft request is attributed to.
+
+        Returns:
+            dict: Keyword arguments for AmbulanceRequestDAO.create().
+
+        """
+        today = datetime.now(UTC).date()
+        return {
+            'user_id': user_id,
+            'transportation_type': extracted.transportation_type
+            or TransportationType.AMBULANCE,
+            'patient_first_name': extracted.patient_first_name or 'Unknown',
+            'patient_last_name': extracted.patient_last_name or 'Unknown',
+            'patient_date_of_birth': extracted.patient_date_of_birth or today,
+            'patient_id': extracted.patient_id or 'TBD',
+            'date_of_transport': extracted.date_of_transport or today,
+            'time_of_transport': extracted.time_of_transport or time(12, 0),
+            'pickup_address': extracted.pickup_address or 'Pending',
+            'destination_address': extracted.destination_address or 'Pending',
+            'primary_diagnosis': extracted.primary_diagnosis,
+            'medical_justification': extracted.medical_justification,
+            'form_number': extracted.form_number,
+            'status': RequestStatus.DRAFT,
+            'ambulatory_status': extracted.ambulatory_status,
+            'oxygen_required': extracted.oxygen_required,
+            'ai_accuracy': extracted.confidence_score,
+            'ordering_physician': extracted.ordering_physician,
+            'physician_phone': extracted.physician_phone,
+            'ordering_physician_npi': extracted.ordering_physician_npi,
+            'patient_sex': extracted.patient_sex,
+            'insurance_type': extracted.insurance_type,
+            'insurance_payer_name': extracted.insurance_payer_name,
+            'insured_id_number': extracted.insured_id_number,
+            'insured_name': extracted.insured_name,
+            'patient_relationship_to_insured': (
+                extracted.patient_relationship_to_insured
+            ),
+        }
+
     async def create_request_with_extraction(
         self, request_data: CreateAmbulanceRequestParseSchema, user_id: int
     ) -> FileUploadWithExtractionResponseSchema:
@@ -319,40 +378,10 @@ class AmbulanceRequestService(BaseService):
         )
         extracted = ai_response.extracted_data
 
-        # Create draft request with extracted data
-        # Use default values for required fields if not extracted
-
-        today = datetime.now(UTC).date()
+        # Create draft request with extracted data, using placeholder
+        # defaults for required fields the AI could not extract.
         draft_request = await self._request_dao.create(
-            user_id=user_id,
-            transportation_type=extracted.transportation_type
-            or TransportationType.AMBULANCE,
-            patient_first_name=extracted.patient_first_name or 'Unknown',
-            patient_last_name=extracted.patient_last_name or 'Unknown',
-            patient_date_of_birth=extracted.patient_date_of_birth or today,
-            patient_id=extracted.patient_id or 'TBD',
-            date_of_transport=extracted.date_of_transport or today,
-            time_of_transport=extracted.time_of_transport or time(12, 0),
-            pickup_address=extracted.pickup_address or 'Pending',
-            destination_address=extracted.destination_address or 'Pending',
-            primary_diagnosis=extracted.primary_diagnosis,
-            medical_justification=extracted.medical_justification,
-            form_number=extracted.form_number,
-            status=RequestStatus.DRAFT,
-            ambulatory_status=extracted.ambulatory_status,
-            oxygen_required=extracted.oxygen_required,
-            ai_accuracy=extracted.confidence_score,
-            ordering_physician=extracted.ordering_physician,
-            physician_phone=extracted.physician_phone,
-            ordering_physician_npi=extracted.ordering_physician_npi,
-            patient_sex=extracted.patient_sex,
-            insurance_type=extracted.insurance_type,
-            insurance_payer_name=extracted.insurance_payer_name,
-            insured_id_number=extracted.insured_id_number,
-            insured_name=extracted.insured_name,
-            patient_relationship_to_insured=(
-                extracted.patient_relationship_to_insured
-            ),
+            **self._build_draft_request_kwargs(extracted, user_id=user_id)
         )
         await self._session.flush()
 
@@ -375,6 +404,101 @@ class AmbulanceRequestService(BaseService):
             extracted_data=ai_response.extracted_data,
             completion_status=completion_status,
         )
+
+    async def create_draft_request_from_fax(
+        self,
+        fax_id: int,
+    ) -> AmbulanceRequest | None:
+        """Auto-create a draft ambulance request from an inbound fax.
+
+        Runs the AI extractor against the fax's stored document and, on
+        a successful extraction, creates a DRAFT request and links the
+        fax to it - the automated counterpart to the manual "upload
+        files, then create_request_with_extraction" flow, triggered by
+        the fax webhook instead of a human upload.
+
+        Only processes faxes still at RECEIVED, so this is safe to call
+        more than once for the same fax_id (e.g. a retried Celery task
+        delivery): a fax already moved past RECEIVED by an earlier call
+        is left untouched.
+
+        Args:
+            fax_id: ID of the inbound fax to process.
+
+        Returns:
+            AmbulanceRequest | None: The created draft, or None if the
+                fax was not eligible for processing, no admin user
+                exists to own the draft, or extraction did not succeed
+                (in which case the fax is marked UNRESOLVED for manual
+                review).
+
+        """
+        fax = await self._incoming_fax_dao.get_by_id(fax_id)
+        if not fax or fax.status != FaxStatus.RECEIVED or not fax.s3_key:
+            logger.info(
+                'Fax %s not eligible for auto-processing (status=%s)',
+                fax_id,
+                fax.status if fax else 'not found',
+            )
+            return None
+
+        # Checkpoint the PROCESSING transition immediately so the fax
+        # doesn't sit at RECEIVED (and look un-picked-up) while the AI
+        # extraction call, which can take a while, is in flight.
+        await self._incoming_fax_dao.update_status(
+            fax_id=fax_id, status=FaxStatus.PROCESSING
+        )
+        await self._session.commit()
+
+        admins = await self._user_dao.get_all_admins(limit=1)
+        if not admins:
+            logger.error(
+                'No admin user exists to own auto-created draft for fax %s',
+                fax_id,
+            )
+            await self._incoming_fax_dao.update_status(
+                fax_id=fax_id, status=FaxStatus.UNRESOLVED
+            )
+            await self._session.commit()
+            return None
+
+        ai_response = await self._ai_extraction_service.extract_data_from_files(
+            file_s3_keys=[fax.s3_key],
+        )
+        extraction_status = (ai_response.extraction_metadata or {}).get(
+            'status'
+        )
+        if extraction_status != 'success':
+            logger.warning(
+                'AI extraction did not succeed for fax %s (%s), '
+                'marking unresolved',
+                fax_id,
+                extraction_status,
+            )
+            await self._incoming_fax_dao.update_status(
+                fax_id=fax_id, status=FaxStatus.UNRESOLVED
+            )
+            await self._session.commit()
+            return None
+
+        draft_request = await self._request_dao.create(
+            **self._build_draft_request_kwargs(
+                ai_response.extracted_data, user_id=admins[0].id
+            )
+        )
+        await self._session.flush()
+        await self._fax_service.link_fax_to_request(
+            fax_id=fax_id,
+            request_id=draft_request.id,
+            matched_by_user_id=None,
+        )
+        await self._session.refresh(draft_request)
+        logger.info(
+            'Auto-created draft request %s from fax %s',
+            draft_request.id,
+            fax_id,
+        )
+        return draft_request
 
     async def create_request(  # noqa: C901,PLR0912, PLR0915
         self,
