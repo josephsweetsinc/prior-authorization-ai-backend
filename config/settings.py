@@ -208,6 +208,11 @@ class RingCentralSettings(BaseSettings):
             request bodies the way some providers do.
         NOVITAS_FAX_NUMBER: Destination fax number for outbound Novitas
             prior-authorization package submissions.
+        FAX_INTAKE_ADMIN_EMAIL: Email of the admin user who owns
+            ambulance requests auto-drafted from an inbound fax (there's
+            no human uploader to attribute them to). If unset, or if it
+            doesn't resolve to an active admin, falls back to the most
+            recently created admin account.
 
     """
 
@@ -222,6 +227,7 @@ class RingCentralSettings(BaseSettings):
     FAX_NUMBER: str = ''
     WEBHOOK_SECRET: str = ''
     NOVITAS_FAX_NUMBER: str = ''
+    FAX_INTAKE_ADMIN_EMAIL: str = ''
 
 
 class RedisSettings(BaseSettings):

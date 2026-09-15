@@ -405,6 +405,36 @@ class AmbulanceRequestService(BaseService):
             completion_status=completion_status,
         )
 
+    async def _resolve_fax_intake_admin(self) -> User | None:
+        """Resolve the admin user who owns auto-drafted fax requests.
+
+        Prefers the admin configured via
+        RINGCENTRAL_FAX_INTAKE_ADMIN_EMAIL, so ownership of these
+        system-initiated drafts is a deliberate choice rather than
+        whichever admin account happens to be newest. Falls back to
+        the most recently created admin if unconfigured, or if the
+        configured email doesn't resolve to an active admin.
+
+        Returns:
+            User | None: The resolved admin, or None if no admin
+                account exists at all.
+
+        """
+        configured_email = settings.ringcentral_settings.FAX_INTAKE_ADMIN_EMAIL
+        if configured_email:
+            user = await self._user_dao.get_by_email(configured_email)
+            if user and user.role == UserRole.ADMIN and user.is_active:
+                return user
+            logger.warning(
+                'Configured fax intake admin (%s) not found or not an '
+                'active admin; falling back to the most recently '
+                'created admin',
+                configured_email,
+            )
+
+        admins = await self._user_dao.get_all_admins(limit=1)
+        return admins[0] if admins else None
+
     async def create_draft_request_from_fax(
         self,
         fax_id: int,
@@ -450,8 +480,8 @@ class AmbulanceRequestService(BaseService):
         )
         await self._session.commit()
 
-        admins = await self._user_dao.get_all_admins(limit=1)
-        if not admins:
+        owning_user = await self._resolve_fax_intake_admin()
+        if not owning_user:
             logger.error(
                 'No admin user exists to own auto-created draft for fax %s',
                 fax_id,
@@ -483,7 +513,7 @@ class AmbulanceRequestService(BaseService):
 
         draft_request = await self._request_dao.create(
             **self._build_draft_request_kwargs(
-                ai_response.extracted_data, user_id=admins[0].id
+                ai_response.extracted_data, user_id=owning_user.id
             )
         )
         await self._session.flush()

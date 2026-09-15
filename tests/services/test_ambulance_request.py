@@ -1238,6 +1238,14 @@ class TestUpdateCallSheetData:
 class TestCreateDraftRequestFromFax:
     """Test suite for AmbulanceRequestService.create_draft_request_from_fax()."""  # noqa: E501
 
+    @pytest.fixture(autouse=True)
+    def _reset_fax_intake_admin_email(self):
+        """Reset the fax intake admin email setting after each test."""
+        settings = Settings.load()
+        original = settings.ringcentral_settings.FAX_INTAKE_ADMIN_EMAIL
+        yield
+        settings.ringcentral_settings.FAX_INTAKE_ADMIN_EMAIL = original
+
     @pytest.fixture
     def mock_ai_service_success(self) -> MagicMock:
         """Create a mock AIExtractionService reporting a successful
@@ -1318,6 +1326,100 @@ class TestCreateDraftRequestFromFax:
         assert fax.status.value == 'matched'
         assert fax.request_id == draft.id
         assert fax.matched_by_user_id is None
+
+    @pytest.mark.asyncio
+    async def test_uses_configured_fax_intake_admin(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_success,
+    ):
+        """Test that the configured RINGCENTRAL_FAX_INTAKE_ADMIN_EMAIL
+        owns the draft, not just whichever admin was created last.
+        """  # noqa: D205
+        designated = await user_factory(
+            email='designated-intake@example.com', role=UserRole.ADMIN
+        )
+        # Created after `designated`, so it would win the "most
+        # recently created admin" fallback if the configured email
+        # were ignored.
+        await user_factory(email='newer-admin@example.com', role=UserRole.ADMIN)
+        Settings.load().ringcentral_settings.FAX_INTAKE_ADMIN_EMAIL = (
+            'designated-intake@example.com'
+        )
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-configured',
+            s3_key='faxes/inbound/rc-draft-configured.pdf',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(fax.id)
+
+        assert draft is not None
+        assert draft.user_id == designated.id
+
+    @pytest.mark.asyncio
+    async def test_falls_back_when_configured_admin_not_found(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_success,
+    ):
+        """Test that an unresolvable configured email falls back to the
+        most recently created admin instead of failing the draft.
+        """  # noqa: D205
+        fallback_admin = await user_factory(
+            email='fallback-admin@example.com', role=UserRole.ADMIN
+        )
+        Settings.load().ringcentral_settings.FAX_INTAKE_ADMIN_EMAIL = (
+            'does-not-exist@example.com'
+        )
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-missing-configured',
+            s3_key='faxes/inbound/rc-draft-missing-configured.pdf',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(fax.id)
+
+        assert draft is not None
+        assert draft.user_id == fallback_admin.id
+
+    @pytest.mark.asyncio
+    async def test_falls_back_when_configured_user_not_admin(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_success,
+    ):
+        """Test that a configured email pointing at a non-admin (or
+        deactivated) user falls back rather than owning the draft.
+        """  # noqa: D205
+        await user_factory(
+            email='provider-only@example.com', role=UserRole.PROVIDER
+        )
+        fallback_admin = await user_factory(
+            email='fallback-admin-2@example.com', role=UserRole.ADMIN
+        )
+        Settings.load().ringcentral_settings.FAX_INTAKE_ADMIN_EMAIL = (
+            'provider-only@example.com'
+        )
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-non-admin-configured',
+            s3_key='faxes/inbound/rc-draft-non-admin-configured.pdf',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(fax.id)
+
+        assert draft is not None
+        assert draft.user_id == fallback_admin.id
 
     @pytest.mark.asyncio
     async def test_extraction_failure_marks_unresolved(
