@@ -6,6 +6,7 @@ from .ambulance_request import (
     TransportationType,
 )
 from .blacklist_token import BlacklistToken
+from .incoming_fax import FaxDirection, FaxStatus, IncomingFax
 from .notification import Notification, NotificationCategory
 from .organization import Organization
 from .password_reset_code import PasswordResetCode
@@ -17,6 +18,9 @@ __all__ = [
     'AmbulanceRequest',
     'BlacklistToken',
     'DenialReason',
+    'FaxDirection',
+    'FaxStatus',
+    'IncomingFax',
     'Notification',
     'NotificationCategory',
     'Organization',

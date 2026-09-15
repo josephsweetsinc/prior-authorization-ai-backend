@@ -5,6 +5,7 @@ from .ambulance_request import (
 )
 from .blacklist_token import BlacklistTokenDAO
 from .dashboard import DashboardDAO
+from .incoming_fax import IncomingFaxDAO
 from .notification import NotificationDAO
 from .organization import OrganizationDAO
 from .password_reset_code import PasswordResetCodeDAO
@@ -15,6 +16,7 @@ __all__ = [
     'AmbulanceRequestDAO',
     'BlacklistTokenDAO',
     'DashboardDAO',
+    'IncomingFaxDAO',
     'NotificationDAO',
     'OrganizationDAO',
     'PasswordResetCodeDAO',

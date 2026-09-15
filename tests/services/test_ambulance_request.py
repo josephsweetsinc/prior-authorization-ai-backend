@@ -1,13 +1,15 @@
 """Tests for AmbulanceRequestService."""
 
-from datetime import date, time, datetime, UTC
+from datetime import UTC, date, datetime, time
 from io import BytesIO
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import UploadFile
 
+from config.settings import Settings
 from dao import (
+    IncomingFaxDAO,
     RequestFileDAO,
     RequestStatusHistoryDAO,
 )
@@ -15,13 +17,23 @@ from exceptions import (
     AmbulanceRequestAllFilesUploadFailedException,
     AmbulanceRequestEmptyDocumentEmtpyException,
     AmbulanceRequestEmptyDocumentFileNameException,
-    AmbulanceRequestInvalidFileIdsException,
+    AmbulanceRequestInvalidStatusException,
     AmbulanceRequestNotFoundException,
+    AmbulanceRequestPDFGenerationException,
     AmbulanceRequestPermissionException,
 )
 from exceptions.file import IncorrectFileSizeException, UnknownFiletypeException
-from models.ambulance_request import RequestStatus, TransportationType
+from models.ambulance_request import (
+    NovitasStatus,
+    RequestStatus,
+    TransportationType,
+)
+from models.incoming_fax import FaxStatus
 from models.user import UserRole
+from schemas.ai_extraction import (
+    AIExtractionResponse,
+    ExtractedTransportationData,
+)
 from schemas.ambulance_request import CreateAmbulanceRequestSchema
 from services.ai.extractor import AIExtractionService
 from services.ambulance_request import AmbulanceRequestService
@@ -584,7 +596,9 @@ class TestAmbulanceRequestService:
             await db_session.commit()
 
             # Create draft
-            from schemas.ambulance_request import CreateAmbulanceRequestParseSchema
+            from schemas.ambulance_request import (
+                CreateAmbulanceRequestParseSchema,
+            )
 
             parse_data = CreateAmbulanceRequestParseSchema(file_ids=file_ids)
             draft_result = await service.create_request_with_extraction(
@@ -685,7 +699,9 @@ class TestAmbulanceRequestService:
             await db_session.commit()
 
             # Create draft
-            from schemas.ambulance_request import CreateAmbulanceRequestParseSchema
+            from schemas.ambulance_request import (
+                CreateAmbulanceRequestParseSchema,
+            )
 
             parse_data = CreateAmbulanceRequestParseSchema(file_ids=file_ids)
             draft_result = await service.create_request_with_extraction(
@@ -753,7 +769,9 @@ class TestAmbulanceRequestService:
             # Use letters only for first name (pattern requires ^[a-zA-Z]+$)
             first_names = ['John', 'Jane', 'Bob', 'Alice', 'Charlie']
             # Create draft
-            from schemas.ambulance_request import CreateAmbulanceRequestParseSchema
+            from schemas.ambulance_request import (
+                CreateAmbulanceRequestParseSchema,
+            )
 
             parse_data = CreateAmbulanceRequestParseSchema(file_ids=file_ids)
             draft_result = await service.create_request_with_extraction(
@@ -950,8 +968,19 @@ class TestAmbulanceRequestService:
         request.ai_accuracy = 0.9
         request.ordering_physician = "Dr"
         request.physician_phone = "555"
+        request.ordering_physician_npi = None
+        request.patient_sex = None
+        request.insurance_type = None
+        request.insurance_payer_name = None
+        request.insured_id_number = None
+        request.insured_name = None
+        request.patient_relationship_to_insured = None
         request.denial_reason = None
         request.denial_notes = None
+        request.utn = None
+        request.novitas_status = NovitasStatus.NOT_SUBMITTED
+        request.novitas_submitted_at = None
+        request.call_sheet_data = None
         request.created_at = datetime.now(UTC)
         request.updated_at = datetime.now(UTC)
         request.reviewer_id = None
@@ -964,7 +993,10 @@ class TestAmbulanceRequestService:
         service._file_dao.get_by_request_id.return_value = []
 
         # Mock get_completion_status
-        from schemas.ambulance_request import CompletionStatus, CompletionStatusSchema
+        from schemas.ambulance_request import (
+            CompletionStatus,
+            CompletionStatusSchema,
+        )
         mock_completion_status = CompletionStatusSchema(
             overall_status=CompletionStatus.COMPLETE,
             missing_fields=[],
@@ -978,3 +1010,871 @@ class TestAmbulanceRequestService:
 
         # Assertion
         service._status_history_dao.create.assert_not_called()
+
+
+class TestGenerateCallSheetPdf:
+    """Test suite for AmbulanceRequestService.generate_call_sheet_pdf()."""
+
+    @pytest.fixture
+    def service(self, db_session) -> AmbulanceRequestService:
+        """Create AmbulanceRequestService instance with S3/AI mocked."""
+        return AmbulanceRequestService(
+            db_session=db_session,
+            s3_actions=MagicMock(spec=S3Actions),
+            ai_extraction_service=MagicMock(spec=AIExtractionService),
+        )
+
+    @pytest.mark.asyncio
+    async def test_provider_can_download_own_request(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a provider can download the Call Sheet for their own
+        request.
+        """  # noqa: D205
+        user = await user_factory()
+        request = await ambulance_request_factory(user_id=user.id)
+        await db_session.commit()
+        service._call_sheet_service = MagicMock()
+        service._call_sheet_service.generate_call_sheet_pdf.return_value = (
+            b'%PDF-fake'
+        )
+
+        pdf_bytes = await service.generate_call_sheet_pdf(
+            request_id=request.id, user=user
+        )
+
+        assert pdf_bytes == b'%PDF-fake'
+
+    @pytest.mark.asyncio
+    async def test_provider_cannot_download_others_request(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a provider cannot download another provider's
+        Call Sheet.
+        """  # noqa: D205
+        owner = await user_factory(email='owner@example.com')
+        other = await user_factory(email='other@example.com')
+        request = await ambulance_request_factory(user_id=owner.id)
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestPermissionException):
+            await service.generate_call_sheet_pdf(
+                request_id=request.id, user=other
+            )
+
+    @pytest.mark.asyncio
+    async def test_admin_can_download_any_request(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that an admin can download any request's Call Sheet."""
+        owner = await user_factory(email='owner2@example.com')
+        admin = await user_factory(
+            email='admin2@example.com', role=UserRole.ADMIN
+        )
+        request = await ambulance_request_factory(user_id=owner.id)
+        await db_session.commit()
+        service._call_sheet_service = MagicMock()
+        service._call_sheet_service.generate_call_sheet_pdf.return_value = (
+            b'%PDF-fake'
+        )
+
+        pdf_bytes = await service.generate_call_sheet_pdf(
+            request_id=request.id, user=admin
+        )
+
+        assert pdf_bytes == b'%PDF-fake'
+
+    @pytest.mark.asyncio
+    async def test_not_found_raises(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        db_session,
+    ):
+        """Test that a nonexistent request raises."""
+        user = await user_factory()
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestNotFoundException):
+            await service.generate_call_sheet_pdf(
+                request_id=999999, user=user
+            )
+
+
+class TestUpdateCallSheetData:
+    """Test suite for AmbulanceRequestService.update_call_sheet_data()."""
+
+    @pytest.fixture
+    def service(self, db_session) -> AmbulanceRequestService:
+        """Create AmbulanceRequestService instance with S3/AI mocked."""
+        return AmbulanceRequestService(
+            db_session=db_session,
+            s3_actions=MagicMock(spec=S3Actions),
+            ai_extraction_service=MagicMock(spec=AIExtractionService),
+        )
+
+    @pytest.mark.asyncio
+    async def test_saves_new_values(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that valid field values are saved."""
+        user = await user_factory()
+        request = await ambulance_request_factory(user_id=user.id)
+        await db_session.commit()
+
+        result = await service.update_call_sheet_data(
+            request_id=request.id,
+            data={'DRIVER': 'Bob Builder', 'Dispatched': '14:32'},
+            user=user,
+        )
+
+        assert result == {'DRIVER': 'Bob Builder', 'Dispatched': '14:32'}
+        await db_session.refresh(request)
+        assert request.call_sheet_data == {
+            'DRIVER': 'Bob Builder',
+            'Dispatched': '14:32',
+        }
+
+    @pytest.mark.asyncio
+    async def test_merges_with_existing_values(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a partial update merges into existing saved data."""
+        user = await user_factory()
+        request = await ambulance_request_factory(user_id=user.id)
+        request.call_sheet_data = {'DRIVER': 'Bob Builder'}
+        await db_session.commit()
+
+        result = await service.update_call_sheet_data(
+            request_id=request.id,
+            data={'Dispatched': '14:32'},
+            user=user,
+        )
+
+        assert result == {'DRIVER': 'Bob Builder', 'Dispatched': '14:32'}
+
+    @pytest.mark.asyncio
+    async def test_unknown_field_name_raises(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a field name not on the template is rejected."""
+        user = await user_factory()
+        request = await ambulance_request_factory(user_id=user.id)
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestInvalidStatusException):
+            await service.update_call_sheet_data(
+                request_id=request.id,
+                data={'NOT_A_REAL_FIELD': 'value'},
+                user=user,
+            )
+
+    @pytest.mark.asyncio
+    async def test_provider_cannot_update_others_request(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a provider cannot update another provider's Call
+        Sheet data.
+        """  # noqa: D205
+        owner = await user_factory(email='cs-owner@example.com')
+        other = await user_factory(email='cs-other@example.com')
+        request = await ambulance_request_factory(user_id=owner.id)
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestPermissionException):
+            await service.update_call_sheet_data(
+                request_id=request.id,
+                data={'DRIVER': 'Bob Builder'},
+                user=other,
+            )
+
+    @pytest.mark.asyncio
+    async def test_not_found_raises(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        db_session,
+    ):
+        """Test that a nonexistent request raises."""
+        user = await user_factory()
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestNotFoundException):
+            await service.update_call_sheet_data(
+                request_id=999999,
+                data={'DRIVER': 'Bob Builder'},
+                user=user,
+            )
+
+
+class TestCreateDraftRequestFromFax:
+    """Test suite for AmbulanceRequestService.create_draft_request_from_fax()."""  # noqa: E501
+
+    @pytest.fixture(autouse=True)
+    def _reset_fax_intake_admin_email(self):
+        """Reset the fax intake admin email setting after each test."""
+        settings = Settings.load()
+        original = settings.ringcentral_settings.FAX_INTAKE_ADMIN_EMAIL
+        yield
+        settings.ringcentral_settings.FAX_INTAKE_ADMIN_EMAIL = original
+
+    @pytest.fixture
+    def mock_ai_service_success(self) -> MagicMock:
+        """Create a mock AIExtractionService reporting a successful
+        extraction.
+        """  # noqa: D205
+        mock = MagicMock(spec=AIExtractionService)
+        mock.extract_data_from_files = AsyncMock(
+            return_value=AIExtractionResponse(
+                extracted_data=ExtractedTransportationData(
+                    patient_first_name='John',
+                    patient_last_name='Doe',
+                    patient_date_of_birth=date(1980, 1, 1),
+                    patient_id='DA123456789HY',
+                    pickup_address='123 Main St',
+                    destination_address='456 Medical Dr',
+                ),
+                extraction_metadata={
+                    'status': 'success',
+                    'files_processed': '1',
+                },
+            )
+        )
+        return mock
+
+    @pytest.fixture
+    def mock_ai_service_failure(self) -> MagicMock:
+        """Create a mock AIExtractionService reporting a failed
+        extraction.
+        """  # noqa: D205
+        mock = MagicMock(spec=AIExtractionService)
+        mock.extract_data_from_files = AsyncMock(
+            return_value=AIExtractionResponse(
+                extracted_data=ExtractedTransportationData(),
+                extraction_metadata={'status': 'error'},
+            )
+        )
+        return mock
+
+    def _make_service(
+        self, db_session, mock_ai_service
+    ) -> AmbulanceRequestService:
+        return AmbulanceRequestService(
+            db_session=db_session,
+            s3_actions=MagicMock(spec=S3Actions),
+            ai_extraction_service=mock_ai_service,
+        )
+
+    @pytest.mark.asyncio
+    async def test_creates_draft_and_marks_matched(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_success,
+    ):
+        """Test that a successful extraction creates a DRAFT request
+        owned by an admin and marks the fax MATCHED.
+        """  # noqa: D205
+        admin = await user_factory(
+            email='admin@example.com', role=UserRole.ADMIN
+        )
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-1',
+            s3_key='faxes/inbound/rc-draft-1.pdf',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(fax.id)
+
+        assert draft is not None
+        assert draft.status == RequestStatus.DRAFT
+        assert draft.user_id == admin.id
+        assert draft.patient_first_name == 'John'
+        assert draft.patient_last_name == 'Doe'
+
+        await db_session.refresh(fax)
+        assert fax.status.value == 'matched'
+        assert fax.request_id == draft.id
+        assert fax.matched_by_user_id is None
+
+    @pytest.mark.asyncio
+    async def test_uses_configured_fax_intake_admin(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_success,
+    ):
+        """Test that the configured RINGCENTRAL_FAX_INTAKE_ADMIN_EMAIL
+        owns the draft, not just whichever admin was created last.
+        """  # noqa: D205
+        designated = await user_factory(
+            email='designated-intake@example.com', role=UserRole.ADMIN
+        )
+        # Created after `designated`, so it would win the "most
+        # recently created admin" fallback if the configured email
+        # were ignored.
+        await user_factory(email='newer-admin@example.com', role=UserRole.ADMIN)
+        Settings.load().ringcentral_settings.FAX_INTAKE_ADMIN_EMAIL = (
+            'designated-intake@example.com'
+        )
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-configured',
+            s3_key='faxes/inbound/rc-draft-configured.pdf',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(fax.id)
+
+        assert draft is not None
+        assert draft.user_id == designated.id
+
+    @pytest.mark.asyncio
+    async def test_falls_back_when_configured_admin_not_found(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_success,
+    ):
+        """Test that an unresolvable configured email falls back to the
+        most recently created admin instead of failing the draft.
+        """  # noqa: D205
+        fallback_admin = await user_factory(
+            email='fallback-admin@example.com', role=UserRole.ADMIN
+        )
+        Settings.load().ringcentral_settings.FAX_INTAKE_ADMIN_EMAIL = (
+            'does-not-exist@example.com'
+        )
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-missing-configured',
+            s3_key='faxes/inbound/rc-draft-missing-configured.pdf',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(fax.id)
+
+        assert draft is not None
+        assert draft.user_id == fallback_admin.id
+
+    @pytest.mark.asyncio
+    async def test_falls_back_when_configured_user_not_admin(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_success,
+    ):
+        """Test that a configured email pointing at a non-admin (or
+        deactivated) user falls back rather than owning the draft.
+        """  # noqa: D205
+        await user_factory(
+            email='provider-only@example.com', role=UserRole.PROVIDER
+        )
+        fallback_admin = await user_factory(
+            email='fallback-admin-2@example.com', role=UserRole.ADMIN
+        )
+        Settings.load().ringcentral_settings.FAX_INTAKE_ADMIN_EMAIL = (
+            'provider-only@example.com'
+        )
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-non-admin-configured',
+            s3_key='faxes/inbound/rc-draft-non-admin-configured.pdf',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(fax.id)
+
+        assert draft is not None
+        assert draft.user_id == fallback_admin.id
+
+    @pytest.mark.asyncio
+    async def test_extraction_failure_marks_unresolved(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_failure,
+    ):
+        """Test that a failed extraction leaves no draft and marks the
+        fax UNRESOLVED.
+        """  # noqa: D205
+        await user_factory(email='admin@example.com', role=UserRole.ADMIN)
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-2',
+            s3_key='faxes/inbound/rc-draft-2.pdf',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_failure)
+        draft = await service.create_draft_request_from_fax(fax.id)
+
+        assert draft is None
+        await db_session.refresh(fax)
+        assert fax.status.value == 'unresolved'
+
+    @pytest.mark.asyncio
+    async def test_no_admin_marks_unresolved(
+        self,
+        db_session,
+        mock_ai_service_success,
+    ):
+        """Test that with no admin user to own the draft, the fax is
+        marked UNRESOLVED instead of raising.
+        """  # noqa: D205
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-3',
+            s3_key='faxes/inbound/rc-draft-3.pdf',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(fax.id)
+
+        assert draft is None
+        await db_session.refresh(fax)
+        assert fax.status.value == 'unresolved'
+
+    @pytest.mark.asyncio
+    async def test_not_received_is_noop(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_success,
+    ):
+        """Test that a fax not at RECEIVED (e.g. already processed by
+        an earlier task delivery) is left untouched.
+        """  # noqa: D205
+        await user_factory(email='admin@example.com', role=UserRole.ADMIN)
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-4',
+            s3_key='faxes/inbound/rc-draft-4.pdf',
+            status=FaxStatus.MATCHED,
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(fax.id)
+
+        assert draft is None
+        mock_ai_service_success.extract_data_from_files.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_fax_is_noop(
+        self,
+        db_session,
+        mock_ai_service_success,
+    ):
+        """Test that a nonexistent fax_id returns None without error."""
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(999999)
+        assert draft is None
+
+
+class TestGenerateCms1500Pdf:
+    """Test suite for AmbulanceRequestService.generate_cms1500_pdf()."""
+
+    @pytest.fixture
+    def service(self, db_session) -> AmbulanceRequestService:
+        """Create AmbulanceRequestService instance with S3/AI mocked."""
+        return AmbulanceRequestService(
+            db_session=db_session,
+            s3_actions=MagicMock(spec=S3Actions),
+            ai_extraction_service=MagicMock(spec=AIExtractionService),
+        )
+
+    @pytest.mark.asyncio
+    async def test_provider_can_download_own_request(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a provider can download the CMS-1500 for their own
+        request.
+        """  # noqa: D205
+        user = await user_factory()
+        request = await ambulance_request_factory(user_id=user.id)
+        await db_session.commit()
+        service._cms1500_generator_service = MagicMock()
+        generate = service._cms1500_generator_service.generate_cms1500_pdf
+        generate.return_value = b'%PDF-fake'
+
+        pdf_bytes = await service.generate_cms1500_pdf(
+            request_id=request.id, user=user
+        )
+
+        assert pdf_bytes == b'%PDF-fake'
+
+    @pytest.mark.asyncio
+    async def test_provider_cannot_download_others_request(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a provider cannot download another provider's
+        CMS-1500.
+        """  # noqa: D205
+        owner = await user_factory(email='cms-owner@example.com')
+        other = await user_factory(email='cms-other@example.com')
+        request = await ambulance_request_factory(user_id=owner.id)
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestPermissionException):
+            await service.generate_cms1500_pdf(
+                request_id=request.id, user=other
+            )
+
+    @pytest.mark.asyncio
+    async def test_admin_can_download_any_request(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that an admin can download any request's CMS-1500."""
+        owner = await user_factory(email='cms-owner2@example.com')
+        admin = await user_factory(
+            email='cms-admin2@example.com', role=UserRole.ADMIN
+        )
+        request = await ambulance_request_factory(user_id=owner.id)
+        await db_session.commit()
+        service._cms1500_generator_service = MagicMock()
+        generate = service._cms1500_generator_service.generate_cms1500_pdf
+        generate.return_value = b'%PDF-fake'
+
+        pdf_bytes = await service.generate_cms1500_pdf(
+            request_id=request.id, user=admin
+        )
+
+        assert pdf_bytes == b'%PDF-fake'
+
+    @pytest.mark.asyncio
+    async def test_not_found_raises(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        db_session,
+    ):
+        """Test that a nonexistent request raises."""
+        user = await user_factory()
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestNotFoundException):
+            await service.generate_cms1500_pdf(
+                request_id=999999, user=user
+            )
+
+
+class TestSubmitToNovitas:
+    """Test suite for AmbulanceRequestService.submit_to_novitas()."""
+
+    @pytest.fixture
+    def service(self, db_session) -> AmbulanceRequestService:
+        """Create AmbulanceRequestService instance with mocks."""
+        service = AmbulanceRequestService(
+            db_session=db_session,
+            s3_actions=MagicMock(spec=S3Actions),
+            ai_extraction_service=MagicMock(spec=AIExtractionService),
+        )
+        service._fax_service = MagicMock()
+        return service
+
+    @pytest.fixture(autouse=True)
+    def _reset_novitas_fax_number(self):
+        """Reset the Novitas fax number setting after each test."""
+        settings = Settings.load()
+        original = settings.ringcentral_settings.NOVITAS_FAX_NUMBER
+        yield
+        settings.ringcentral_settings.NOVITAS_FAX_NUMBER = original
+
+    def _mock_can_submit(
+        self, service: AmbulanceRequestService, *, can_submit: bool = True
+    ) -> None:
+        from schemas.ambulance_request import (
+            CompletionStatus,
+            CompletionStatusSchema,
+        )
+
+        service.get_completion_status = AsyncMock(
+            return_value=CompletionStatusSchema(
+                overall_status=(
+                    CompletionStatus.COMPLETE
+                    if can_submit
+                    else CompletionStatus.MISSING
+                ),
+                missing_fields=[],
+                missing_documents=[],
+                can_submit=can_submit,
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_not_found_raises(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        db_session,
+    ):
+        """Test that a nonexistent request raises."""
+        admin = await user_factory(
+            email='novitas-nf-admin@example.com', role=UserRole.ADMIN
+        )
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestNotFoundException):
+            await service.submit_to_novitas(request_id=999999, user=admin)
+
+    @pytest.mark.asyncio
+    async def test_non_admin_raises_permission(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a non-admin user cannot submit to Novitas."""
+        owner = await user_factory(email='novitas-owner@example.com')
+        request = await ambulance_request_factory(
+            user_id=owner.id, status=RequestStatus.APPROVED
+        )
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestPermissionException):
+            await service.submit_to_novitas(
+                request_id=request.id, user=owner
+            )
+
+    @pytest.mark.asyncio
+    async def test_not_approved_raises_invalid_status(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a non-approved request cannot be submitted."""
+        admin = await user_factory(
+            email='novitas-pending-admin@example.com', role=UserRole.ADMIN
+        )
+        owner = await user_factory(email='novitas-pending-owner@example.com')
+        request = await ambulance_request_factory(
+            user_id=owner.id, status=RequestStatus.PENDING
+        )
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestInvalidStatusException):
+            await service.submit_to_novitas(
+                request_id=request.id, user=admin
+            )
+
+    @pytest.mark.asyncio
+    async def test_already_submitted_raises_invalid_status(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a request already submitted cannot be resubmitted."""
+        admin = await user_factory(
+            email='novitas-dup-admin@example.com', role=UserRole.ADMIN
+        )
+        owner = await user_factory(email='novitas-dup-owner@example.com')
+        request = await ambulance_request_factory(
+            user_id=owner.id, status=RequestStatus.APPROVED
+        )
+        request.novitas_status = NovitasStatus.SUBMITTED
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestInvalidStatusException):
+            await service.submit_to_novitas(
+                request_id=request.id, user=admin
+            )
+
+    @pytest.mark.asyncio
+    async def test_incomplete_request_raises_pdf_generation_exception(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that an incomplete request cannot be submitted."""
+        admin = await user_factory(
+            email='novitas-incomplete-admin@example.com', role=UserRole.ADMIN
+        )
+        owner = await user_factory(
+            email='novitas-incomplete-owner@example.com'
+        )
+        request = await ambulance_request_factory(
+            user_id=owner.id, status=RequestStatus.APPROVED
+        )
+        await db_session.commit()
+        self._mock_can_submit(service, can_submit=False)
+
+        with pytest.raises(AmbulanceRequestPDFGenerationException):
+            await service.submit_to_novitas(
+                request_id=request.id, user=admin
+            )
+
+    @pytest.mark.asyncio
+    async def test_missing_fax_number_raises_pdf_generation_exception(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a missing Novitas fax number config raises."""
+        admin = await user_factory(
+            email='novitas-nofax-admin@example.com', role=UserRole.ADMIN
+        )
+        owner = await user_factory(email='novitas-nofax-owner@example.com')
+        request = await ambulance_request_factory(
+            user_id=owner.id, status=RequestStatus.APPROVED
+        )
+        await db_session.commit()
+        self._mock_can_submit(service)
+        Settings.load().ringcentral_settings.NOVITAS_FAX_NUMBER = ''
+
+        with pytest.raises(AmbulanceRequestPDFGenerationException):
+            await service.submit_to_novitas(
+                request_id=request.id, user=admin
+            )
+
+    @pytest.mark.asyncio
+    async def test_success_sends_fax_and_updates_status(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test a successful Novitas submission sends a fax and updates
+        the request's Novitas tracking fields.
+        """  # noqa: D205
+        admin = await user_factory(
+            email='novitas-ok-admin@example.com', role=UserRole.ADMIN
+        )
+        owner = await user_factory(email='novitas-ok-owner@example.com')
+        request = await ambulance_request_factory(
+            user_id=owner.id, status=RequestStatus.APPROVED
+        )
+        await db_session.commit()
+        self._mock_can_submit(service)
+        Settings.load().ringcentral_settings.NOVITAS_FAX_NUMBER = (
+            '+15559990000'
+        )
+        service._pdf_generator_service = MagicMock()
+        service._pdf_generator_service.generate_cms_10344_pdf.return_value = (
+            b'%PDF-cms'
+        )
+        service._file_dao.get_by_request_id = AsyncMock(return_value=[])
+        fake_fax = MagicMock(id=42)
+        service._fax_service.send_outbound_fax = AsyncMock(
+            return_value=fake_fax
+        )
+
+        result = await service.submit_to_novitas(
+            request_id=request.id, user=admin
+        )
+
+        assert result.id == request.id
+        service._fax_service.send_outbound_fax.assert_awaited_once()
+        call_kwargs = service._fax_service.send_outbound_fax.call_args.kwargs
+        assert call_kwargs['to_number'] == '+15559990000'
+        assert call_kwargs['request_id'] == request.id
+        assert len(call_kwargs['attachments']) == 1
+        assert call_kwargs['attachments'][0][1] == b'%PDF-cms'
+
+        await db_session.refresh(request)
+        assert request.novitas_status == NovitasStatus.SUBMITTED
+        assert request.novitas_fax_id == 42
+        assert request.novitas_submitted_at is not None
+
+    @pytest.mark.asyncio
+    async def test_success_includes_supporting_documents(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that linked supporting documents are attached to the fax."""
+        admin = await user_factory(
+            email='novitas-docs-admin@example.com', role=UserRole.ADMIN
+        )
+        owner = await user_factory(email='novitas-docs-owner@example.com')
+        request = await ambulance_request_factory(
+            user_id=owner.id, status=RequestStatus.APPROVED
+        )
+        await db_session.commit()
+        self._mock_can_submit(service)
+        Settings.load().ringcentral_settings.NOVITAS_FAX_NUMBER = (
+            '+15559990000'
+        )
+        service._pdf_generator_service = MagicMock()
+        service._pdf_generator_service.generate_cms_10344_pdf.return_value = (
+            b'%PDF-cms'
+        )
+        fake_file = MagicMock(id=1, filename='pcs.pdf', s3_key='key/pcs.pdf')
+        service._file_dao.get_by_request_id = AsyncMock(
+            return_value=[fake_file]
+        )
+        service._s3_actions.download_from_s3 = MagicMock(
+            return_value=(b'%PDF-pcs', 'application/pdf')
+        )
+        fake_fax = MagicMock(id=7)
+        service._fax_service.send_outbound_fax = AsyncMock(
+            return_value=fake_fax
+        )
+
+        await service.submit_to_novitas(request_id=request.id, user=admin)
+
+        call_kwargs = service._fax_service.send_outbound_fax.call_args.kwargs
+        assert len(call_kwargs['attachments']) == 2
+        assert call_kwargs['attachments'][1] == (
+            'pcs.pdf',
+            b'%PDF-pcs',
+            'application/pdf',
+        )

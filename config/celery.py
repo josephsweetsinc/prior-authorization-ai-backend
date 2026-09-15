@@ -61,6 +61,7 @@ def create_celery_app() -> Celery:
         imports=(
             'tasks.expiration_reminders',
             'tasks.user_tasks',
+            'tasks.fax_processing',
         ),
     )
 
