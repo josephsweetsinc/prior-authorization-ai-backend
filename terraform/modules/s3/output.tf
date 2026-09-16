@@ -1,3 +1,3 @@
-output "bucket_endpoint" {
-  value = aws_s3_bucket.main.website_endpoint
+output "bucket_name" {
+  value = aws_s3_bucket.main.id
 }
