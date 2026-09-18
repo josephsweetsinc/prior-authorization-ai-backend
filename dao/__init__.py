@@ -10,6 +10,7 @@ from .notification import NotificationDAO
 from .organization import OrganizationDAO
 from .password_reset_code import PasswordResetCodeDAO
 from .report import ReportDAO
+from .request_access_log import RequestAccessLogDAO
 from .user import UserDAO
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     'OrganizationDAO',
     'PasswordResetCodeDAO',
     'ReportDAO',
+    'RequestAccessLogDAO',
     'RequestFileDAO',
     'RequestStatusHistoryDAO',
     'UserDAO',

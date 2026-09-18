@@ -11,6 +11,7 @@ from .notification import Notification, NotificationCategory
 from .organization import Organization
 from .password_reset_code import PasswordResetCode
 from .report import Report, ReportFormat
+from .request_access_log import PHIAccessAction, RequestAccessLog
 from .request_file import RequestFile
 from .user import User, UserRole
 
@@ -24,9 +25,11 @@ __all__ = [
     'Notification',
     'NotificationCategory',
     'Organization',
+    'PHIAccessAction',
     'PasswordResetCode',
     'Report',
     'ReportFormat',
+    'RequestAccessLog',
     'RequestFile',
     'RequestStatus',
     'RequestStatusHistory',

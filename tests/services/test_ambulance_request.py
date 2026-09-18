@@ -10,6 +10,7 @@ from fastapi import UploadFile
 from config.settings import Settings
 from dao import (
     IncomingFaxDAO,
+    RequestAccessLogDAO,
     RequestFileDAO,
     RequestStatusHistoryDAO,
 )
@@ -29,6 +30,7 @@ from models.ambulance_request import (
     TransportationType,
 )
 from models.incoming_fax import FaxStatus
+from models.request_access_log import PHIAccessAction
 from models.user import UserRole
 from schemas.ai_extraction import (
     AIExtractionResponse,
@@ -1603,6 +1605,161 @@ class TestGenerateCms1500Pdf:
             await service.generate_cms1500_pdf(
                 request_id=999999, user=user
             )
+
+
+class TestPHIAccessLogging:
+    """Test suite for PHI access audit logging (_log_access and the
+    view/download call sites that trigger it).
+    """  # noqa: D205
+
+    @pytest.fixture
+    def service(self, db_session) -> AmbulanceRequestService:
+        """Create AmbulanceRequestService instance with S3/AI mocked."""
+        return AmbulanceRequestService(
+            db_session=db_session,
+            s3_actions=MagicMock(spec=S3Actions),
+            ai_extraction_service=MagicMock(spec=AIExtractionService),
+        )
+
+    async def _entries(
+        self, db_session, request_id: int
+    ) -> list:
+        return await RequestAccessLogDAO(db_session).get_by_request_id(
+            request_id
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_request_by_id_logs_view(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that opening a request's detail view logs a VIEW entry."""
+        user = await user_factory()
+        request = await ambulance_request_factory(user_id=user.id)
+        await db_session.commit()
+
+        await service.get_request_by_id(user=user, request_id=request.id)
+
+        entries = await self._entries(db_session, request.id)
+        assert len(entries) == 1
+        assert entries[0].action == PHIAccessAction.VIEW
+        assert entries[0].user_id == user.id
+
+    @pytest.mark.asyncio
+    async def test_get_request_by_id_permission_denied_does_not_log(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a denied access attempt is not logged as a view -
+        only actual authorized access is.
+        """  # noqa: D205
+        owner = await user_factory(email='phi-owner@example.com')
+        other = await user_factory(email='phi-other@example.com')
+        request = await ambulance_request_factory(user_id=owner.id)
+        await db_session.commit()
+
+        with pytest.raises(AmbulanceRequestPermissionException):
+            await service.get_request_by_id(user=other, request_id=request.id)
+
+        entries = await self._entries(db_session, request.id)
+        assert entries == []
+
+    @pytest.mark.asyncio
+    async def test_generate_call_sheet_pdf_logs_download(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that generating the Call Sheet PDF logs a download."""
+        user = await user_factory()
+        request = await ambulance_request_factory(user_id=user.id)
+        await db_session.commit()
+
+        await service.generate_call_sheet_pdf(
+            request_id=request.id, user=user
+        )
+
+        entries = await self._entries(db_session, request.id)
+        assert len(entries) == 1
+        assert entries[0].action == PHIAccessAction.DOWNLOAD_CALL_SHEET
+
+    @pytest.mark.asyncio
+    async def test_generate_cms1500_pdf_logs_download(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that generating the CMS-1500 PDF logs a download."""
+        user = await user_factory()
+        request = await ambulance_request_factory(user_id=user.id)
+        await db_session.commit()
+
+        await service.generate_cms1500_pdf(request_id=request.id, user=user)
+
+        entries = await self._entries(db_session, request.id)
+        assert len(entries) == 1
+        assert entries[0].action == PHIAccessAction.DOWNLOAD_CMS1500
+
+    @pytest.mark.asyncio
+    async def test_generate_pdf_logs_download_only_on_success(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that generate_pdf (Novitas package) only logs a download
+        once the completion-status gate actually passes, not on a
+        failed attempt against an incomplete request.
+        """  # noqa: D205
+        from schemas.ambulance_request import (
+            CompletionStatus,
+            CompletionStatusSchema,
+        )
+
+        user = await user_factory()
+        request = await ambulance_request_factory(user_id=user.id)
+        await db_session.commit()
+
+        service.get_completion_status = AsyncMock(
+            return_value=CompletionStatusSchema(
+                overall_status=CompletionStatus.MISSING,
+                missing_fields=[],
+                missing_documents=[],
+                can_submit=False,
+            )
+        )
+        with pytest.raises(AmbulanceRequestPDFGenerationException):
+            await service.generate_pdf(request_id=request.id, user=user)
+        assert await self._entries(db_session, request.id) == []
+
+        service.get_completion_status = AsyncMock(
+            return_value=CompletionStatusSchema(
+                overall_status=CompletionStatus.COMPLETE,
+                missing_fields=[],
+                missing_documents=[],
+                can_submit=True,
+            )
+        )
+        service._pdf_generator_service = MagicMock()
+        service._pdf_generator_service.generate_cms_10344_pdf.return_value = (
+            b'%PDF-fake'
+        )
+        await service.generate_pdf(request_id=request.id, user=user)
+
+        entries = await self._entries(db_session, request.id)
+        assert len(entries) == 1
+        assert entries[0].action == PHIAccessAction.DOWNLOAD_NOVITAS_PACKAGE
 
 
 class TestSubmitToNovitas:

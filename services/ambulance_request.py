@@ -12,6 +12,7 @@ from core import BaseService
 from dao import (
     AmbulanceRequestDAO,
     IncomingFaxDAO,
+    RequestAccessLogDAO,
     RequestFileDAO,
     RequestStatusHistoryDAO,
     UserDAO,
@@ -31,6 +32,7 @@ from exceptions import (
 )
 from models import (
     AmbulanceRequest,
+    PHIAccessAction,
     RequestFile,
     RequestStatus,
     User,
@@ -91,6 +93,7 @@ class AmbulanceRequestService(BaseService):
         file_dao: RequestFileDAO | None = None,
         status_history_dao: RequestStatusHistoryDAO | None = None,
         incoming_fax_dao: IncomingFaxDAO | None = None,
+        access_log_dao: RequestAccessLogDAO | None = None,
         s3_actions: S3Actions | None = None,
         ai_extraction_service: AIExtractionService | None = None,
         notification_service: NotificationService | None = None,
@@ -108,6 +111,9 @@ class AmbulanceRequestService(BaseService):
             status_history_dao or RequestStatusHistoryDAO(db_session)
         )
         self._incoming_fax_dao = incoming_fax_dao or IncomingFaxDAO(db_session)
+        self._access_log_dao = access_log_dao or RequestAccessLogDAO(
+            db_session
+        )
         self._s3_actions = s3_actions or S3Actions()
         self._ai_extraction_service = (
             ai_extraction_service
@@ -127,6 +133,45 @@ class AmbulanceRequestService(BaseService):
             cms1500_generator_service or CMS1500GeneratorService()
         )
         self._fax_service = fax_service or FaxService(db_session)
+
+    async def _log_access(
+        self,
+        *,
+        request_id: int,
+        user_id: int,
+        action: PHIAccessAction,
+    ) -> None:
+        """Record a PHI access audit log entry.
+
+        Distinct from RequestStatusHistory, which only tracks status
+        *changes*: this tracks reads (viewing a request's detail, or
+        downloading one of its generated documents). Commits
+        immediately, since several of the call sites are otherwise
+        read-only requests with no other commit to piggyback on.
+
+        Failures here are logged but never raised - a failure to
+        write the audit trail should not block access to data the
+        caller has already been authorized to see.
+
+        Args:
+            request_id: ID of the request that was accessed.
+            user_id: ID of the user who accessed it.
+            action: What kind of access this was.
+
+        """
+        try:
+            await self._access_log_dao.create(
+                request_id=request_id,
+                user_id=user_id,
+                action=action,
+            )
+            await self._session.commit()
+        except Exception:
+            logger.exception(
+                'Failed to record PHI access log (request=%s, action=%s)',
+                request_id,
+                action,
+            )
 
     async def upload_file(
         self,
@@ -697,6 +742,12 @@ class AmbulanceRequestService(BaseService):
         # User can see his own requests, or all if he is an admin
         if request.user_id != user.id and user.role != UserRole.ADMIN:
             raise AmbulanceRequestPermissionException
+
+        await self._log_access(
+            request_id=request_id,
+            user_id=user.id,
+            action=PHIAccessAction.VIEW,
+        )
 
         # If admin opens SUBMITTED request for the first time, change to PENDING
         if (
@@ -1698,6 +1749,12 @@ Necessity document, or "NO" if it is not."""
             )
             raise AmbulanceRequestPDFGenerationException(error_msg)
 
+        await self._log_access(
+            request_id=request_id,
+            user_id=user.id,
+            action=PHIAccessAction.DOWNLOAD_NOVITAS_PACKAGE,
+        )
+
         # Generate PDF
         pdf_bytes = self._pdf_generator_service.generate_cms_10344_pdf(
             request=request
@@ -1742,6 +1799,12 @@ Necessity document, or "NO" if it is not."""
 
         if request.user_id != user.id and user.role != UserRole.ADMIN:
             raise AmbulanceRequestPermissionException
+
+        await self._log_access(
+            request_id=request_id,
+            user_id=user.id,
+            action=PHIAccessAction.DOWNLOAD_CALL_SHEET,
+        )
 
         pdf_bytes = self._call_sheet_service.generate_call_sheet_pdf(
             request=request
@@ -1845,6 +1908,12 @@ Necessity document, or "NO" if it is not."""
 
         if request.user_id != user.id and user.role != UserRole.ADMIN:
             raise AmbulanceRequestPermissionException
+
+        await self._log_access(
+            request_id=request_id,
+            user_id=user.id,
+            action=PHIAccessAction.DOWNLOAD_CMS1500,
+        )
 
         pdf_bytes = self._cms1500_generator_service.generate_cms1500_pdf(
             request=request
