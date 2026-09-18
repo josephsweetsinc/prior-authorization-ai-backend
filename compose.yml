@@ -16,6 +16,51 @@ services:
       - container
     command: uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
+  redis:
+    container_name: "paai_redis"
+    image: redis:7-alpine
+    restart: always
+    networks:
+      - container
+
+  celery_worker:
+    container_name: "paai_celery_worker"
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - .:/app
+      - /app/.venv
+    networks:
+      - container
+    depends_on:
+      - redis
+    command: uv run celery -A config.celery worker --loglevel=info
+
+  celery_beat:
+    container_name: "paai_celery_beat"
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - .:/app
+      - /app/.venv
+    networks:
+      - container
+    depends_on:
+      - redis
+    command: uv run celery -A config.celery beat --loglevel=info
+
 networks:
   container:
     driver: bridge

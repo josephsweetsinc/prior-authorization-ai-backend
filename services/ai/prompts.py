@@ -28,6 +28,15 @@ Your task is to carefully analyze the provided medical document images and extra
    - Check if oxygen is required during transport (look for mentions of oxygen therapy, O2 requirements, or respiratory support). If oxygen requirement is not mentioned or unclear, set to `false` (not `null`).
    - Extract ordering physician name (may appear as "Ordering Physician", "Physician Name", "MD Name", etc.).
    - Extract physician phone number (may appear near physician name or in contact information section).
+   - Extract the ordering physician's NPI (National Provider Identifier), a 10-digit number, often labeled "NPI" near the physician's name or signature block.
+
+4. **Insurance/Payer Information**:
+   - Determine patient sex ("male" or "female") if stated or indicated by a checkbox (e.g., "M"/"F").
+   - Determine insurance type from any payer checkboxes or headers (Medicare, Medicaid, TRICARE, CHAMPVA, group health plan, FECA/Black Lung, or other).
+   - Extract the insurance/payer name as written (e.g., "Medicare", "Blue Cross Blue Shield").
+   - Extract the insured's ID/member number. For Medicare patients this is usually the same as the patient ID (MBI) already extracted above.
+   - Extract the insured's name only if it differs from the patient's name (i.e., the patient is a dependent of the insured).
+   - Determine the patient's relationship to the insured (self, spouse, child, or other). Only set this to "self" when the document clearly shows the patient is the insured/beneficiary; otherwise leave it null rather than guessing.
 
 ## Confidence Score Calculation:
 Provide a `confidence_score` as an integer between 0 and 100 based on the following:

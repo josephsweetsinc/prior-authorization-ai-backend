@@ -98,6 +98,49 @@ class TestAmbulanceRequestDAO:
         assert found is None
 
     @pytest.mark.asyncio
+    async def test_get_by_id_for_update(
+        self,
+        db_session,
+        user_factory,
+    ):
+        """Test getting request by ID with a row lock."""
+        user = await user_factory()
+        await db_session.commit()
+
+        dao = AmbulanceRequestDAO(db_session)
+        created = await dao.create(
+            user_id=user.id,
+            transportation_type=TransportationType.AMBULANCE,
+            patient_first_name='John',
+            patient_last_name='Doe',
+            patient_date_of_birth=date(1980, 1, 1),
+            patient_id='DA123456789HY',
+            date_of_transport=date(2025, 12, 6),
+            time_of_transport=time(13, 40),
+            pickup_address='123 Main St',
+            destination_address='456 Medical Dr',
+        )
+        await db_session.commit()
+
+        found = await dao.get_by_id_for_update(created.id)
+
+        assert found is not None
+        assert found.id == created.id
+        assert found.patient_first_name == 'John'
+
+    @pytest.mark.asyncio
+    async def test_get_by_id_for_update_not_found(
+        self,
+        db_session,
+    ):
+        """Test getting a non-existent request with a row lock returns
+        None.
+        """  # noqa: D205
+        dao = AmbulanceRequestDAO(db_session)
+        found = await dao.get_by_id_for_update(99999)
+        assert found is None
+
+    @pytest.mark.asyncio
     async def test_get_by_user_id(
         self,
         db_session,

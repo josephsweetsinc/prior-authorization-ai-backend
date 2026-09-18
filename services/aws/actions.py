@@ -250,6 +250,26 @@ class S3Actions(AWSActions, FileActionMixin):
             ExpiresIn=expires_in,
         )
 
+    def download_from_s3(self, key: str) -> tuple[bytes, str]:
+        """Download an object's raw bytes and content type from S3.
+
+        Args:
+            key: S3 storage key (path) of the file.
+
+        Returns:
+            Tuple of (content bytes, content type).
+
+        Raises:
+            ClientError: If the object does not exist in the bucket.
+
+        """
+        response = self.s3_client.get_object(
+            Bucket=self.aws_bucket_name, Key=key
+        )
+        content = response['Body'].read()
+        content_type = response.get('ContentType', 'application/octet-stream')
+        return content, content_type
+
     def _get_file_extension(self, content_type: str) -> str:
         """Get file extension from MIME type.
 
