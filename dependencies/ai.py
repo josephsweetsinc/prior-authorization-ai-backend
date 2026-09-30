@@ -23,4 +23,10 @@ def get_llm() -> ChatOpenAI:
         model=settings.llm_settings.MODEL_NAME,
         temperature=settings.llm_settings.TEMPERATURE,
         max_tokens=settings.llm_settings.MAX_TOKENS,
+        # Every request through this client sends PHI (fax/medical
+        # document images) for extraction. store=False opts out of
+        # OpenAI's per-call logging/retention regardless of the org's
+        # own default, since nothing here should be retained on their
+        # side beyond serving the response.
+        store=False,
     )

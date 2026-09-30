@@ -9,7 +9,11 @@ from fastapi.testclient import TestClient
 
 from dependencies.auth import get_current_user
 from main import app
-from models.ambulance_request import RequestStatus, TransportationType
+from models.ambulance_request import (
+    NovitasStatus,
+    RequestStatus,
+    TransportationType,
+)
 from models.user import UserRole
 
 
@@ -680,8 +684,19 @@ class TestAmbulanceRequestEndpoints:
                 ai_accuracy=None,
                 ordering_physician='Dr. Smith',
                 physician_phone='555-123-4567',
+                ordering_physician_npi=None,
+                patient_sex=None,
+                insurance_type=None,
+                insurance_payer_name=None,
+                insured_id_number=None,
+                insured_name=None,
+                patient_relationship_to_insured=None,
                 denial_reason=None,
                 denial_notes=None,
+                utn=None,
+                novitas_status=NovitasStatus.NOT_SUBMITTED,
+                novitas_submitted_at=None,
+                call_sheet_data=None,
                 created_at=datetime(2025, 1, 1, 0, 0, 0),
                 updated_at=datetime(2025, 1, 2, 0, 0, 0),
                 status_history=[
@@ -799,8 +814,19 @@ class TestAmbulanceRequestEndpoints:
                 ai_accuracy=None,
                 ordering_physician='Dr. Smith',
                 physician_phone='555-123-4567',
+                ordering_physician_npi=None,
+                patient_sex=None,
+                insurance_type=None,
+                insurance_payer_name=None,
+                insured_id_number=None,
+                insured_name=None,
+                patient_relationship_to_insured=None,
                 denial_reason=None,
                 denial_notes=None,
+                utn=None,
+                novitas_status=NovitasStatus.NOT_SUBMITTED,
+                novitas_submitted_at=None,
+                call_sheet_data=None,
                 created_at=datetime(2025, 1, 1, 0, 0, 0),
                 updated_at=datetime(2025, 1, 2, 0, 0, 0),
                 status_history=[],
@@ -831,3 +857,204 @@ class TestAmbulanceRequestEndpoints:
             # completion_status should be computed and included in response
             assert 'completion_status' in data
             assert data['completion_status']['overall_status'] == 'complete'
+
+
+class TestDownloadCallSheetPdfEndpoint:
+    """Test suite for the Call Sheet PDF download endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_download_call_sheet_pdf_success(
+        self,
+        client: TestClient,
+        auth_headers,
+        mock_user,
+    ):
+        """Test successfully downloading a Call Sheet PDF."""
+
+        async def get_user_override():
+            return mock_user
+
+        app.dependency_overrides[get_current_user] = get_user_override
+
+        with patch(
+            'services.ambulance_request.AmbulanceRequestService'
+            '.generate_call_sheet_pdf',
+            new_callable=AsyncMock,
+        ) as mock_generate:
+            mock_generate.return_value = b'%PDF-fake-call-sheet-content'
+
+            response = client.get(
+                '/Prod/api/v1/ambulance-request/156/call-sheet-pdf',
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        assert response.headers['content-type'] == 'application/pdf'
+        assert 'Call-Sheet_Request-156' in (
+            response.headers['content-disposition']
+        )
+        assert response.content == b'%PDF-fake-call-sheet-content'
+        mock_generate.assert_awaited_once_with(
+            request_id=156, user=mock_user
+        )
+
+
+class TestUpdateCallSheetDataEndpoint:
+    """Test suite for the Call Sheet data PATCH endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_update_call_sheet_data_success(
+        self,
+        client: TestClient,
+        auth_headers,
+        mock_user,
+    ):
+        """Test successfully saving Call Sheet field values."""
+
+        async def get_user_override():
+            return mock_user
+
+        app.dependency_overrides[get_current_user] = get_user_override
+
+        with patch(
+            'services.ambulance_request.AmbulanceRequestService'
+            '.update_call_sheet_data',
+            new_callable=AsyncMock,
+        ) as mock_update:
+            mock_update.return_value = {'DRIVER': 'Bob Builder'}
+
+            response = client.patch(
+                '/Prod/api/v1/ambulance-request/156/call-sheet-data',
+                json={'data': {'DRIVER': 'Bob Builder'}},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        assert response.json() == {'DRIVER': 'Bob Builder'}
+        mock_update.assert_awaited_once_with(
+            request_id=156, data={'DRIVER': 'Bob Builder'}, user=mock_user
+        )
+
+
+class TestDownloadCms1500PdfEndpoint:
+    """Test suite for the CMS-1500 PDF download endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_download_cms1500_pdf_success(
+        self,
+        client: TestClient,
+        auth_headers,
+        mock_user,
+    ):
+        """Test successfully downloading a CMS-1500 PDF."""
+
+        async def get_user_override():
+            return mock_user
+
+        app.dependency_overrides[get_current_user] = get_user_override
+
+        with patch(
+            'services.ambulance_request.AmbulanceRequestService'
+            '.generate_cms1500_pdf',
+            new_callable=AsyncMock,
+        ) as mock_generate:
+            mock_generate.return_value = b'%PDF-fake-cms1500-content'
+
+            response = client.get(
+                '/Prod/api/v1/ambulance-request/156/cms1500-pdf',
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        assert response.headers['content-type'] == 'application/pdf'
+        assert 'CMS-1500_Request-156' in (
+            response.headers['content-disposition']
+        )
+        assert response.content == b'%PDF-fake-cms1500-content'
+        mock_generate.assert_awaited_once_with(
+            request_id=156, user=mock_user
+        )
+
+
+class TestSubmitToNovitasEndpoint:
+    """Test suite for the Submit to Novitas endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_submit_to_novitas_success(
+        self,
+        client: TestClient,
+        auth_headers,
+        db_session,
+        user_factory,
+    ):
+        """Test successfully submitting a request to Novitas."""
+        admin = await user_factory(
+            email='novitas-endpoint-admin@example.com', role=UserRole.ADMIN
+        )
+        await db_session.commit()
+
+        from dependencies.auth import get_admin_user_from_token
+
+        async def get_admin_override():
+            return admin
+
+        app.dependency_overrides[get_admin_user_from_token] = (
+            get_admin_override
+        )
+
+        with patch(
+            'services.ambulance_request.AmbulanceRequestService'
+            '.submit_to_novitas',
+            new_callable=AsyncMock,
+        ) as mock_submit:
+            from datetime import datetime
+
+            from schemas.ambulance_request import AmbulanceRequestResponseSchema
+
+            mock_submit.return_value = AmbulanceRequestResponseSchema(
+                id=156,
+                user_id=1,
+                patient_first_name='John',
+                patient_last_name='Doe',
+                primary_diagnosis='Chronic heart failure',
+                status=RequestStatus.APPROVED,
+                pickup_address='123 Main St, Springfield, IL 62701',
+                destination_address='456 Medical Dr, Springfield, IL 62702',
+                transportation_type=TransportationType.AMBULANCE,
+                patient_id='1EG4-TE5-MK72',
+                created_at=datetime(2025, 1, 1, 0, 0, 0),
+                updated_at=datetime(2025, 1, 1, 0, 0, 0),
+                novitas_status=NovitasStatus.SUBMITTED,
+            )
+
+            response = client.post(
+                '/Prod/api/v1/ambulance-request/156/submit-to-novitas',
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data['id'] == 156
+        assert data['novitas_status'] == 'submitted'
+        mock_submit.assert_awaited_once_with(request_id=156, user=admin)
+
+    @pytest.mark.asyncio
+    async def test_submit_to_novitas_requires_admin(
+        self,
+        client: TestClient,
+        auth_headers,
+        mock_user,
+    ):
+        """Test that a non-admin user cannot access the endpoint."""
+
+        async def get_user_override():
+            return mock_user
+
+        app.dependency_overrides[get_current_user] = get_user_override
+
+        response = client.post(
+            '/Prod/api/v1/ambulance-request/156/submit-to-novitas',
+            headers=auth_headers,
+        )
+
+        assert response.status_code in (401, 403, 404)

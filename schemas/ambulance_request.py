@@ -12,6 +12,10 @@ from pydantic import (
 from models.ambulance_request import (
     AmbulatoryStatus,
     DenialReason,
+    InsuranceType,
+    NovitasStatus,
+    PatientRelationshipToInsured,
+    PatientSex,
     RequestStatus,
     TransportationType,
 )
@@ -335,6 +339,49 @@ class CreateAmbulanceRequestSchema(BaseModel):
         description='Phone number of the ordering physician',
         max_length=50,
     )
+    ordering_physician_npi: str | None = Field(
+        None,
+        examples=['1234567893'],
+        description='NPI of the ordering physician (CMS-1500 Box 17b)',
+        max_length=10,
+    )
+    patient_sex: PatientSex | None = Field(
+        None,
+        examples=[PatientSex.FEMALE],
+        description='Patient sex (CMS-1500 Box 3)',
+    )
+    insurance_type: InsuranceType | None = Field(
+        None,
+        examples=[InsuranceType.MEDICARE],
+        description='Type of insurance/payer (CMS-1500 Box 1)',
+    )
+    insurance_payer_name: str | None = Field(
+        None,
+        examples=['Medicare'],
+        description='Name of the insurance carrier/payer',
+        max_length=200,
+    )
+    insured_id_number: str | None = Field(
+        None,
+        examples=['1EG4-TE5-MK72'],
+        description="Insured's ID number (CMS-1500 Box 1a)",
+        max_length=50,
+    )
+    insured_name: str | None = Field(
+        None,
+        examples=['John Doe'],
+        description=(
+            "Insured's name (CMS-1500 Box 4), if different from the patient"
+        ),
+        max_length=200,
+    )
+    patient_relationship_to_insured: PatientRelationshipToInsured | None = (
+        Field(
+            None,
+            examples=[PatientRelationshipToInsured.SELF],
+            description="Patient's relationship to insured (CMS-1500 Box 6)",
+        )
+    )
 
 
 class AmbulanceRequestResponseSchema(BaseModel):
@@ -417,6 +464,40 @@ class AmbulanceRequestResponseSchema(BaseModel):
             default=None,
             description='CMS form number (e.g., CMS-10344)',
             examples=['CMS-10344'],
+        ),
+    ]
+    utn: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                'Unique Tracking Number issued by Novitas (CMS-1500 Box 23)'
+            ),
+            examples=['A1234B5678C9'],
+        ),
+    ]
+    novitas_status: Annotated[
+        NovitasStatus,
+        Field(
+            default=NovitasStatus.NOT_SUBMITTED,
+            description='Status of the external Novitas prior authorization',
+        ),
+    ]
+    novitas_submitted_at: Annotated[
+        datetime | None,
+        Field(
+            default=None,
+            description='When the Novitas PA package was faxed to Novitas',
+        ),
+    ]
+    call_sheet_data: Annotated[
+        dict[str, str] | None,
+        Field(
+            default=None,
+            description=(
+                'Interactively-entered Call Sheet field values, keyed by '
+                'the template field name'
+            ),
         ),
     ]
     created_at: datetime
@@ -530,8 +611,19 @@ class AdminRequestWithStatusHistorySchema(BaseModel):
     ai_accuracy: float | None
     ordering_physician: str | None
     physician_phone: str | None
+    ordering_physician_npi: str | None
+    patient_sex: PatientSex | None
+    insurance_type: InsuranceType | None
+    insurance_payer_name: str | None
+    insured_id_number: str | None
+    insured_name: str | None
+    patient_relationship_to_insured: PatientRelationshipToInsured | None
     denial_reason: DenialReason | None
     denial_notes: str | None
+    utn: str | None
+    novitas_status: NovitasStatus
+    novitas_submitted_at: datetime | None
+    call_sheet_data: dict[str, str] | None
     created_at: datetime
     updated_at: datetime
     status_history: list[RequestStatusHistoryResponseSchema] = []
@@ -600,6 +692,21 @@ class DenyRequestSchema(BaseModel):
             and not self.denial_notes
         ):
             raise ValueError(DENIAL_NOTES_REQUIRED_MSG)
+
+
+class UpdateCallSheetDataSchema(BaseModel):
+    """Schema for saving interactively-entered Call Sheet field values."""
+
+    data: Annotated[
+        dict[str, str],
+        Field(
+            description=(
+                'Partial map of Call Sheet template field name to value, '
+                'merged into any previously saved values.'
+            ),
+            examples=[{'Dispatched': '14:32', 'Chief ComplaintsRow1': 'X'}],
+        ),
+    ]
 
 
 class AdminUpdateRequestSchema(BaseModel):
@@ -679,6 +786,39 @@ class AdminUpdateRequestSchema(BaseModel):
             max_length=50,
         ),
     ]
+    ordering_physician_npi: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=10,
+        ),
+    ]
+    patient_sex: PatientSex | None = None
+    insurance_type: InsuranceType | None = None
+    insurance_payer_name: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=200,
+        ),
+    ]
+    insured_id_number: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=50,
+        ),
+    ]
+    insured_name: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=200,
+        ),
+    ]
+    patient_relationship_to_insured: PatientRelationshipToInsured | None = (
+        None
+    )
     denial_reason: DenialReason | None = None
     denial_notes: Annotated[
         str | None,
@@ -688,6 +828,28 @@ class AdminUpdateRequestSchema(BaseModel):
             description=(
                 'Additional notes for denial '
                 '(required if denial_reason is OTHER_REASON)'
+            ),
+        ),
+    ]
+    utn: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=50,
+            description=(
+                'Unique Tracking Number issued by Novitas, recorded '
+                'manually once known (Novitas has no status API)'
+            ),
+            examples=['A1234B5678C9'],
+        ),
+    ]
+    novitas_status: Annotated[
+        NovitasStatus | None,
+        Field(
+            default=None,
+            description=(
+                'External Novitas prior authorization status, recorded '
+                'manually once known'
             ),
         ),
     ]

@@ -1,14 +1,18 @@
 import logging
 from datetime import UTC, datetime, time
 from io import BytesIO
+from typing import Any
 
 from fastapi import UploadFile
 from langchain_core.messages import HumanMessage, SystemMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.settings import Settings
 from core import BaseService
 from dao import (
     AmbulanceRequestDAO,
+    IncomingFaxDAO,
+    RequestAccessLogDAO,
     RequestFileDAO,
     RequestStatusHistoryDAO,
     UserDAO,
@@ -28,12 +32,18 @@ from exceptions import (
 )
 from models import (
     AmbulanceRequest,
+    PHIAccessAction,
     RequestFile,
     RequestStatus,
     User,
     UserRole,
 )
-from models.ambulance_request import DenialReason, TransportationType
+from models.ambulance_request import (
+    DenialReason,
+    NovitasStatus,
+    TransportationType,
+)
+from models.incoming_fax import FaxStatus
 from schemas import (
     AdminRequestWithStatusHistorySchema,
     AdminUpdateRequestSchema,
@@ -50,12 +60,18 @@ from schemas import (
     RequestStatusHistoryResponseSchema,
     RequestWithStatusHistorySchema,
 )
+from schemas.ai_extraction import ExtractedTransportationData
 from services.ai.extractor import AIExtractionService
 from services.aws.actions import S3Actions
+from services.call_sheet import CallSheetService
+from services.cms1500_generator import CMS1500GeneratorService
+from services.fax.fax_service import FaxService
 from services.notification import NotificationService
 from services.pdf_generator import PDFGeneratorService
 
 logger = logging.getLogger(__name__)
+
+settings = Settings.load()
 
 # Validation constants
 MIN_NAME_LENGTH = 3
@@ -76,11 +92,16 @@ class AmbulanceRequestService(BaseService):
         request_dao: AmbulanceRequestDAO | None = None,
         file_dao: RequestFileDAO | None = None,
         status_history_dao: RequestStatusHistoryDAO | None = None,
+        incoming_fax_dao: IncomingFaxDAO | None = None,
+        access_log_dao: RequestAccessLogDAO | None = None,
         s3_actions: S3Actions | None = None,
         ai_extraction_service: AIExtractionService | None = None,
         notification_service: NotificationService | None = None,
         user_dao: UserDAO | None = None,
         pdf_generator_service: PDFGeneratorService | None = None,
+        call_sheet_service: CallSheetService | None = None,
+        cms1500_generator_service: CMS1500GeneratorService | None = None,
+        fax_service: FaxService | None = None,
     ):
         """Initialize AmbulanceRequestService."""
         super().__init__(db_session)
@@ -88,6 +109,10 @@ class AmbulanceRequestService(BaseService):
         self._file_dao = file_dao or RequestFileDAO(db_session)
         self._status_history_dao = (
             status_history_dao or RequestStatusHistoryDAO(db_session)
+        )
+        self._incoming_fax_dao = incoming_fax_dao or IncomingFaxDAO(db_session)
+        self._access_log_dao = access_log_dao or RequestAccessLogDAO(
+            db_session
         )
         self._s3_actions = s3_actions or S3Actions()
         self._ai_extraction_service = (
@@ -101,6 +126,52 @@ class AmbulanceRequestService(BaseService):
         self._pdf_generator_service = (
             pdf_generator_service or PDFGeneratorService()
         )
+        self._call_sheet_service = (
+            call_sheet_service or CallSheetService()
+        )
+        self._cms1500_generator_service = (
+            cms1500_generator_service or CMS1500GeneratorService()
+        )
+        self._fax_service = fax_service or FaxService(db_session)
+
+    async def _log_access(
+        self,
+        *,
+        request_id: int,
+        user_id: int,
+        action: PHIAccessAction,
+    ) -> None:
+        """Record a PHI access audit log entry.
+
+        Distinct from RequestStatusHistory, which only tracks status
+        *changes*: this tracks reads (viewing a request's detail, or
+        downloading one of its generated documents). Commits
+        immediately, since several of the call sites are otherwise
+        read-only requests with no other commit to piggyback on.
+
+        Failures here are logged but never raised - a failure to
+        write the audit trail should not block access to data the
+        caller has already been authorized to see.
+
+        Args:
+            request_id: ID of the request that was accessed.
+            user_id: ID of the user who accessed it.
+            action: What kind of access this was.
+
+        """
+        try:
+            await self._access_log_dao.create(
+                request_id=request_id,
+                user_id=user_id,
+                action=action,
+            )
+            await self._session.commit()
+        except Exception:
+            logger.exception(
+                'Failed to record PHI access log (request=%s, action=%s)',
+                request_id,
+                action,
+            )
 
     async def upload_file(
         self,
@@ -236,6 +307,59 @@ class AmbulanceRequestService(BaseService):
         """
         return await self._extract_s3_keys(files=files, user_id=user_id)
 
+    @staticmethod
+    def _build_draft_request_kwargs(
+        extracted: ExtractedTransportationData,
+        *,
+        user_id: int,
+    ) -> dict[str, Any]:
+        """Build AmbulanceRequestDAO.create() kwargs from extracted data.
+
+        Fills in placeholder defaults for required fields the AI could
+        not extract, so a draft can always be created for review rather
+        than blocking on missing data.
+
+        Args:
+            extracted: Structured data extracted by the AI service.
+            user_id: ID of the user the draft request is attributed to.
+
+        Returns:
+            dict: Keyword arguments for AmbulanceRequestDAO.create().
+
+        """
+        today = datetime.now(UTC).date()
+        return {
+            'user_id': user_id,
+            'transportation_type': extracted.transportation_type
+            or TransportationType.AMBULANCE,
+            'patient_first_name': extracted.patient_first_name or 'Unknown',
+            'patient_last_name': extracted.patient_last_name or 'Unknown',
+            'patient_date_of_birth': extracted.patient_date_of_birth or today,
+            'patient_id': extracted.patient_id or 'TBD',
+            'date_of_transport': extracted.date_of_transport or today,
+            'time_of_transport': extracted.time_of_transport or time(12, 0),
+            'pickup_address': extracted.pickup_address or 'Pending',
+            'destination_address': extracted.destination_address or 'Pending',
+            'primary_diagnosis': extracted.primary_diagnosis,
+            'medical_justification': extracted.medical_justification,
+            'form_number': extracted.form_number,
+            'status': RequestStatus.DRAFT,
+            'ambulatory_status': extracted.ambulatory_status,
+            'oxygen_required': extracted.oxygen_required,
+            'ai_accuracy': extracted.confidence_score,
+            'ordering_physician': extracted.ordering_physician,
+            'physician_phone': extracted.physician_phone,
+            'ordering_physician_npi': extracted.ordering_physician_npi,
+            'patient_sex': extracted.patient_sex,
+            'insurance_type': extracted.insurance_type,
+            'insurance_payer_name': extracted.insurance_payer_name,
+            'insured_id_number': extracted.insured_id_number,
+            'insured_name': extracted.insured_name,
+            'patient_relationship_to_insured': (
+                extracted.patient_relationship_to_insured
+            ),
+        }
+
     async def create_request_with_extraction(
         self, request_data: CreateAmbulanceRequestParseSchema, user_id: int
     ) -> FileUploadWithExtractionResponseSchema:
@@ -299,31 +423,10 @@ class AmbulanceRequestService(BaseService):
         )
         extracted = ai_response.extracted_data
 
-        # Create draft request with extracted data
-        # Use default values for required fields if not extracted
-
-        today = datetime.now(UTC).date()
+        # Create draft request with extracted data, using placeholder
+        # defaults for required fields the AI could not extract.
         draft_request = await self._request_dao.create(
-            user_id=user_id,
-            transportation_type=extracted.transportation_type
-            or TransportationType.AMBULANCE,
-            patient_first_name=extracted.patient_first_name or 'Unknown',
-            patient_last_name=extracted.patient_last_name or 'Unknown',
-            patient_date_of_birth=extracted.patient_date_of_birth or today,
-            patient_id=extracted.patient_id or 'TBD',
-            date_of_transport=extracted.date_of_transport or today,
-            time_of_transport=extracted.time_of_transport or time(12, 0),
-            pickup_address=extracted.pickup_address or 'Pending',
-            destination_address=extracted.destination_address or 'Pending',
-            primary_diagnosis=extracted.primary_diagnosis,
-            medical_justification=extracted.medical_justification,
-            form_number=extracted.form_number,
-            status=RequestStatus.DRAFT,
-            ambulatory_status=extracted.ambulatory_status,
-            oxygen_required=extracted.oxygen_required,
-            ai_accuracy=extracted.confidence_score,
-            ordering_physician=extracted.ordering_physician,
-            physician_phone=extracted.physician_phone,
+            **self._build_draft_request_kwargs(extracted, user_id=user_id)
         )
         await self._session.flush()
 
@@ -346,6 +449,131 @@ class AmbulanceRequestService(BaseService):
             extracted_data=ai_response.extracted_data,
             completion_status=completion_status,
         )
+
+    async def _resolve_fax_intake_admin(self) -> User | None:
+        """Resolve the admin user who owns auto-drafted fax requests.
+
+        Prefers the admin configured via
+        RINGCENTRAL_FAX_INTAKE_ADMIN_EMAIL, so ownership of these
+        system-initiated drafts is a deliberate choice rather than
+        whichever admin account happens to be newest. Falls back to
+        the most recently created admin if unconfigured, or if the
+        configured email doesn't resolve to an active admin.
+
+        Returns:
+            User | None: The resolved admin, or None if no admin
+                account exists at all.
+
+        """
+        configured_email = settings.ringcentral_settings.FAX_INTAKE_ADMIN_EMAIL
+        if configured_email:
+            user = await self._user_dao.get_by_email(configured_email)
+            if user and user.role == UserRole.ADMIN and user.is_active:
+                return user
+            logger.warning(
+                'Configured fax intake admin (%s) not found or not an '
+                'active admin; falling back to the most recently '
+                'created admin',
+                configured_email,
+            )
+
+        admins = await self._user_dao.get_all_admins(limit=1)
+        return admins[0] if admins else None
+
+    async def create_draft_request_from_fax(
+        self,
+        fax_id: int,
+    ) -> AmbulanceRequest | None:
+        """Auto-create a draft ambulance request from an inbound fax.
+
+        Runs the AI extractor against the fax's stored document and, on
+        a successful extraction, creates a DRAFT request and links the
+        fax to it - the automated counterpart to the manual "upload
+        files, then create_request_with_extraction" flow, triggered by
+        the fax webhook instead of a human upload.
+
+        Only processes faxes still at RECEIVED, so this is safe to call
+        more than once for the same fax_id (e.g. a retried Celery task
+        delivery): a fax already moved past RECEIVED by an earlier call
+        is left untouched.
+
+        Args:
+            fax_id: ID of the inbound fax to process.
+
+        Returns:
+            AmbulanceRequest | None: The created draft, or None if the
+                fax was not eligible for processing, no admin user
+                exists to own the draft, or extraction did not succeed
+                (in which case the fax is marked UNRESOLVED for manual
+                review).
+
+        """
+        fax = await self._incoming_fax_dao.get_by_id(fax_id)
+        if not fax or fax.status != FaxStatus.RECEIVED or not fax.s3_key:
+            logger.info(
+                'Fax %s not eligible for auto-processing (status=%s)',
+                fax_id,
+                fax.status if fax else 'not found',
+            )
+            return None
+
+        # Checkpoint the PROCESSING transition immediately so the fax
+        # doesn't sit at RECEIVED (and look un-picked-up) while the AI
+        # extraction call, which can take a while, is in flight.
+        await self._incoming_fax_dao.update_status(
+            fax_id=fax_id, status=FaxStatus.PROCESSING
+        )
+        await self._session.commit()
+
+        owning_user = await self._resolve_fax_intake_admin()
+        if not owning_user:
+            logger.error(
+                'No admin user exists to own auto-created draft for fax %s',
+                fax_id,
+            )
+            await self._incoming_fax_dao.update_status(
+                fax_id=fax_id, status=FaxStatus.UNRESOLVED
+            )
+            await self._session.commit()
+            return None
+
+        ai_response = await self._ai_extraction_service.extract_data_from_files(
+            file_s3_keys=[fax.s3_key],
+        )
+        extraction_status = (ai_response.extraction_metadata or {}).get(
+            'status'
+        )
+        if extraction_status != 'success':
+            logger.warning(
+                'AI extraction did not succeed for fax %s (%s), '
+                'marking unresolved',
+                fax_id,
+                extraction_status,
+            )
+            await self._incoming_fax_dao.update_status(
+                fax_id=fax_id, status=FaxStatus.UNRESOLVED
+            )
+            await self._session.commit()
+            return None
+
+        draft_request = await self._request_dao.create(
+            **self._build_draft_request_kwargs(
+                ai_response.extracted_data, user_id=owning_user.id
+            )
+        )
+        await self._session.flush()
+        await self._fax_service.link_fax_to_request(
+            fax_id=fax_id,
+            request_id=draft_request.id,
+            matched_by_user_id=None,
+        )
+        await self._session.refresh(draft_request)
+        logger.info(
+            'Auto-created draft request %s from fax %s',
+            draft_request.id,
+            fax_id,
+        )
+        return draft_request
 
     async def create_request(  # noqa: C901,PLR0912, PLR0915
         self,
@@ -400,6 +628,26 @@ class AmbulanceRequestService(BaseService):
             request.ordering_physician = request_data.ordering_physician
         if request_data.physician_phone is not None:
             request.physician_phone = request_data.physician_phone
+        if request_data.ordering_physician_npi is not None:
+            request.ordering_physician_npi = (
+                request_data.ordering_physician_npi
+            )
+        if request_data.patient_sex is not None:
+            request.patient_sex = request_data.patient_sex
+        if request_data.insurance_type is not None:
+            request.insurance_type = request_data.insurance_type
+        if request_data.insurance_payer_name is not None:
+            request.insurance_payer_name = (
+                request_data.insurance_payer_name
+            )
+        if request_data.insured_id_number is not None:
+            request.insured_id_number = request_data.insured_id_number
+        if request_data.insured_name is not None:
+            request.insured_name = request_data.insured_name
+        if request_data.patient_relationship_to_insured is not None:
+            request.patient_relationship_to_insured = (
+                request_data.patient_relationship_to_insured
+            )
 
         # Check if request can be submitted (uses request state we just set)
         completion_status = await self.get_completion_status(request=request)
@@ -494,6 +742,12 @@ class AmbulanceRequestService(BaseService):
         # User can see his own requests, or all if he is an admin
         if request.user_id != user.id and user.role != UserRole.ADMIN:
             raise AmbulanceRequestPermissionException
+
+        await self._log_access(
+            request_id=request_id,
+            user_id=user.id,
+            action=PHIAccessAction.VIEW,
+        )
 
         # If admin opens SUBMITTED request for the first time, change to PENDING
         if (
@@ -612,8 +866,21 @@ class AmbulanceRequestService(BaseService):
                 else None,
                 ordering_physician=request.ordering_physician,
                 physician_phone=request.physician_phone,
+                ordering_physician_npi=request.ordering_physician_npi,
+                patient_sex=request.patient_sex,
+                insurance_type=request.insurance_type,
+                insurance_payer_name=request.insurance_payer_name,
+                insured_id_number=request.insured_id_number,
+                insured_name=request.insured_name,
+                patient_relationship_to_insured=(
+                    request.patient_relationship_to_insured
+                ),
                 denial_reason=request.denial_reason,
                 denial_notes=request.denial_notes,
+                utn=request.utn,
+                novitas_status=request.novitas_status,
+                novitas_submitted_at=request.novitas_submitted_at,
+                call_sheet_data=request.call_sheet_data,
                 created_at=request.created_at,
                 updated_at=request.updated_at,
                 status_history=status_history_schemas,
@@ -632,6 +899,10 @@ class AmbulanceRequestService(BaseService):
             transportation_type=request.transportation_type,
             patient_id=request.patient_id,
             form_number=request.form_number,
+            utn=request.utn,
+            novitas_status=request.novitas_status,
+            novitas_submitted_at=request.novitas_submitted_at,
+            call_sheet_data=request.call_sheet_data,
             created_at=request.created_at,
             updated_at=request.updated_at,
             status_history=status_history_schemas,
@@ -1309,10 +1580,32 @@ Necessity document, or "NO" if it is not."""
             request.ordering_physician = update_data.ordering_physician
         if update_data.physician_phone is not None:
             request.physician_phone = update_data.physician_phone
+        if update_data.ordering_physician_npi is not None:
+            request.ordering_physician_npi = (
+                update_data.ordering_physician_npi
+            )
+        if update_data.patient_sex is not None:
+            request.patient_sex = update_data.patient_sex
+        if update_data.insurance_type is not None:
+            request.insurance_type = update_data.insurance_type
+        if update_data.insurance_payer_name is not None:
+            request.insurance_payer_name = update_data.insurance_payer_name
+        if update_data.insured_id_number is not None:
+            request.insured_id_number = update_data.insured_id_number
+        if update_data.insured_name is not None:
+            request.insured_name = update_data.insured_name
+        if update_data.patient_relationship_to_insured is not None:
+            request.patient_relationship_to_insured = (
+                update_data.patient_relationship_to_insured
+            )
         if update_data.denial_reason is not None:
             request.denial_reason = update_data.denial_reason
         if update_data.denial_notes is not None:
             request.denial_notes = update_data.denial_notes
+        if update_data.utn is not None:
+            request.utn = update_data.utn
+        if update_data.novitas_status is not None:
+            request.novitas_status = update_data.novitas_status
 
         await self._session.flush()
         await self._session.commit()
@@ -1387,8 +1680,21 @@ Necessity document, or "NO" if it is not."""
             else None,
             ordering_physician=request.ordering_physician,
             physician_phone=request.physician_phone,
+            ordering_physician_npi=request.ordering_physician_npi,
+            patient_sex=request.patient_sex,
+            insurance_type=request.insurance_type,
+            insurance_payer_name=request.insurance_payer_name,
+            insured_id_number=request.insured_id_number,
+            insured_name=request.insured_name,
+            patient_relationship_to_insured=(
+                request.patient_relationship_to_insured
+            ),
             denial_reason=request.denial_reason,
             denial_notes=request.denial_notes,
+            utn=request.utn,
+            novitas_status=request.novitas_status,
+            novitas_submitted_at=request.novitas_submitted_at,
+            call_sheet_data=request.call_sheet_data,
             created_at=request.created_at,
             updated_at=request.updated_at,
             status_history=status_history_schemas,
@@ -1443,6 +1749,12 @@ Necessity document, or "NO" if it is not."""
             )
             raise AmbulanceRequestPDFGenerationException(error_msg)
 
+        await self._log_access(
+            request_id=request_id,
+            user_id=user.id,
+            action=PHIAccessAction.DOWNLOAD_NOVITAS_PACKAGE,
+        )
+
         # Generate PDF
         pdf_bytes = self._pdf_generator_service.generate_cms_10344_pdf(
             request=request
@@ -1455,3 +1767,282 @@ Necessity document, or "NO" if it is not."""
         )
 
         return pdf_bytes
+
+    async def generate_call_sheet_pdf(
+        self,
+        request_id: int,
+        user: User,
+    ) -> bytes:
+        """Generate a Call Sheet PDF for a request.
+
+        Unlike the CMS-10344 PDF, the Call Sheet is an operational
+        dispatch document, not a regulatory submission, so it can be
+        generated as soon as the request exists - it does not require
+        the same full completion-status validation.
+
+        Args:
+            request_id: ID of the request to generate the Call Sheet for.
+            user: Current authenticated user.
+
+        Returns:
+            bytes: Filled (but not flattened) Call Sheet PDF file bytes.
+
+        Raises:
+            AmbulanceRequestNotFoundException: If request not found.
+            AmbulanceRequestPermissionException: If user doesn't have
+                permission.
+
+        """
+        request = await self._request_dao.get_by_id(request_id=request_id)
+        if not request:
+            raise AmbulanceRequestNotFoundException
+
+        if request.user_id != user.id and user.role != UserRole.ADMIN:
+            raise AmbulanceRequestPermissionException
+
+        await self._log_access(
+            request_id=request_id,
+            user_id=user.id,
+            action=PHIAccessAction.DOWNLOAD_CALL_SHEET,
+        )
+
+        pdf_bytes = self._call_sheet_service.generate_call_sheet_pdf(
+            request=request
+        )
+
+        logger.info(
+            'Generated Call Sheet PDF for request %s (size: %d bytes)',
+            request_id,
+            len(pdf_bytes),
+        )
+
+        return pdf_bytes
+
+    async def update_call_sheet_data(
+        self,
+        request_id: int,
+        data: dict[str, str],
+        user: User,
+    ) -> dict[str, str]:
+        """Merge interactively-entered values into a request's Call Sheet.
+
+        Used by the "eyeball check" console so an admin can fill in the
+        Call Sheet's operational fields (vitals, times, chief complaints,
+        etc.) before approving, instead of only being able to fill them
+        by hand on the printed PDF.
+
+        Args:
+            request_id: ID of the request to update.
+            data: Partial map of Call Sheet template field name to value.
+            user: Current authenticated user.
+
+        Returns:
+            dict[str, str]: The full merged call_sheet_data after saving.
+
+        Raises:
+            AmbulanceRequestNotFoundException: If request not found.
+            AmbulanceRequestPermissionException: If user doesn't have
+                permission.
+            AmbulanceRequestInvalidStatusException: If any field name is
+                not part of the Call Sheet template.
+
+        """
+        # Locks the row for the rest of this transaction so two concurrent
+        # saves (e.g. two admin tabs) can't each read the same base dict
+        # and silently drop each other's merged keys on commit.
+        request = await self._request_dao.get_by_id_for_update(
+            request_id=request_id
+        )
+        if not request:
+            raise AmbulanceRequestNotFoundException
+
+        if request.user_id != user.id and user.role != UserRole.ADMIN:
+            raise AmbulanceRequestPermissionException
+
+        valid_field_names = self._call_sheet_service.get_editable_field_names()
+        unknown_fields = set(data) - valid_field_names
+        if unknown_fields:
+            raise AmbulanceRequestInvalidStatusException(  # noqa: TRY003
+                f'Unknown Call Sheet field(s): '
+                f'{", ".join(sorted(unknown_fields))}'
+            )
+
+        merged = dict(request.call_sheet_data or {})
+        merged.update(data)
+        request.call_sheet_data = merged
+        await self._session.flush()
+        await self._session.commit()
+        await self._session.refresh(request)
+
+        return request.call_sheet_data or {}
+
+    async def generate_cms1500_pdf(
+        self,
+        request_id: int,
+        user: User,
+    ) -> bytes:
+        """Generate a CMS-1500 claim data summary PDF for a request.
+
+        Like the Call Sheet, this does not require full completion-status
+        validation - it is a data summary reviewable at any stage, and
+        clearly marks which CMS-1500 fields (service lines, billing
+        provider info) are not yet available from prior authorization
+        data.
+
+        Args:
+            request_id: ID of the request to generate the CMS-1500 for.
+            user: Current authenticated user.
+
+        Returns:
+            bytes: CMS-1500 PDF file bytes.
+
+        Raises:
+            AmbulanceRequestNotFoundException: If request not found.
+            AmbulanceRequestPermissionException: If user doesn't have
+                permission.
+
+        """
+        request = await self._request_dao.get_by_id(request_id=request_id)
+        if not request:
+            raise AmbulanceRequestNotFoundException
+
+        if request.user_id != user.id and user.role != UserRole.ADMIN:
+            raise AmbulanceRequestPermissionException
+
+        await self._log_access(
+            request_id=request_id,
+            user_id=user.id,
+            action=PHIAccessAction.DOWNLOAD_CMS1500,
+        )
+
+        pdf_bytes = self._cms1500_generator_service.generate_cms1500_pdf(
+            request=request
+        )
+
+        logger.info(
+            'Generated CMS-1500 PDF for request %s (size: %d bytes)',
+            request_id,
+            len(pdf_bytes),
+        )
+
+        return pdf_bytes
+
+    async def submit_to_novitas(
+        self,
+        request_id: int,
+        user: User,
+    ) -> AmbulanceRequestResponseSchema:
+        """Fax the Novitas prior-authorization package for a request.
+
+        Builds the Novitas PA package - the CMS-10344 authorization form
+        plus any uploaded supporting documents (medical records, PCS,
+        etc.) - and faxes it to Novitas in a single transmission. This is
+        the "AI submits Novitas PA" step of the review-and-approve
+        workflow: it only runs after an admin has approved the request
+        (the single approval gate) and only once per request.
+
+        Args:
+            request_id: ID of the request to submit.
+            user: Current authenticated user (must be admin).
+
+        Returns:
+            AmbulanceRequestResponseSchema: Updated request.
+
+        Raises:
+            AmbulanceRequestNotFoundException: If request not found.
+            AmbulanceRequestPermissionException: If user is not an admin.
+            AmbulanceRequestInvalidStatusException: If the request has
+                not been approved yet, or has already been submitted.
+            AmbulanceRequestPDFGenerationException: If required fields
+                are missing, or the Novitas fax number is not configured.
+
+        """
+        request = await self._request_dao.get_by_id(request_id=request_id)
+        if not request:
+            raise AmbulanceRequestNotFoundException
+
+        if user.role != UserRole.ADMIN:
+            raise AmbulanceRequestPermissionException
+
+        if request.status != RequestStatus.APPROVED:
+            raise AmbulanceRequestInvalidStatusException(  # noqa: TRY003
+                'Request must be approved before submitting to Novitas'
+            )
+        if request.novitas_status != NovitasStatus.NOT_SUBMITTED:
+            raise AmbulanceRequestInvalidStatusException(  # noqa: TRY003
+                'Request has already been submitted to Novitas '
+                f'(status: {request.novitas_status.value})'
+            )
+
+        completion_status = await self.get_completion_status(request=request)
+        if not completion_status.can_submit:
+            missing_items = (
+                completion_status.missing_fields
+                + completion_status.missing_documents
+            )
+            missing_names = ', '.join(item.name for item in missing_items)
+            error_msg = (
+                f'Cannot submit to Novitas. Missing required items: '
+                f'{missing_names}. All required fields and documents '
+                f'must be completed before submission.'
+            )
+            raise AmbulanceRequestPDFGenerationException(error_msg)
+
+        novitas_fax_number = settings.ringcentral_settings.NOVITAS_FAX_NUMBER
+        if not novitas_fax_number:
+            raise AmbulanceRequestPDFGenerationException(  # noqa: TRY003
+                'Novitas fax number is not configured'
+            )
+
+        cms_pdf_bytes = self._pdf_generator_service.generate_cms_10344_pdf(
+            request=request
+        )
+        attachments: list[tuple[str, bytes, str]] = [
+            (
+                f'CMS-10344_Request-{request_id}.pdf',
+                cms_pdf_bytes,
+                'application/pdf',
+            ),
+        ]
+
+        files = await self._file_dao.get_by_request_id(request_id=request_id)
+        for file in files:
+            try:
+                content, content_type = self._s3_actions.download_from_s3(
+                    file.s3_key
+                )
+            except Exception:
+                logger.exception(
+                    'Failed to download supporting document %s for '
+                    'Novitas submission (request %s)',
+                    file.id,
+                    request_id,
+                )
+                continue
+            attachments.append((file.filename, content, content_type))
+
+        fax = await self._fax_service.send_outbound_fax(
+            to_number=novitas_fax_number,
+            attachments=attachments,
+            request_id=request_id,
+            cover_page_text=(
+                f'Novitas Prior Authorization Package - Request '
+                f'#{request_id} - {request.patient_first_name} '
+                f'{request.patient_last_name}'
+            ),
+        )
+
+        request.novitas_status = NovitasStatus.SUBMITTED
+        request.novitas_submitted_at = datetime.now(UTC)
+        request.novitas_fax_id = fax.id
+        await self._session.flush()
+        await self._session.commit()
+        await self._session.refresh(request)
+
+        logger.info(
+            'Submitted Novitas PA package for request %s (fax id=%s)',
+            request_id,
+            fax.id,
+        )
+
+        return AmbulanceRequestResponseSchema.model_validate(request)

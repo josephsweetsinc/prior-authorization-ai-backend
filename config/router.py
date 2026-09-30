@@ -7,6 +7,7 @@ from endpoints import (
     ambulance_request_router,
     auth_router,
     dashboard_router,
+    fax_router,
     main_router,
     notification_router,
     organization_router,
@@ -67,5 +68,10 @@ def initialize_routers() -> APIRouter:
         websocket_router,
         prefix='/websocket',
         tags=['websocket'],
+    )
+    main_api_router.include_router(
+        fax_router,
+        prefix='/fax',
+        tags=['fax'],
     )
     return main_api_router

@@ -4,7 +4,13 @@ from datetime import date, time
 
 from pydantic import BaseModel, Field
 
-from models.ambulance_request import AmbulatoryStatus, TransportationType
+from models.ambulance_request import (
+    AmbulatoryStatus,
+    InsuranceType,
+    PatientRelationshipToInsured,
+    PatientSex,
+    TransportationType,
+)
 
 
 class ExtractedTransportationData(BaseModel):
@@ -119,6 +125,61 @@ class ExtractedTransportationData(BaseModel):
         default=None,
         examples=['555-123-4567'],
         description='Phone number of the ordering physician',
+    )
+    ordering_physician_npi: str | None = Field(
+        default=None,
+        examples=['1234567893'],
+        description=(
+            'National Provider Identifier (NPI) of the ordering physician. '
+            '10-digit number, often near the physician name/signature or '
+            'labeled "NPI"'
+        ),
+    )
+    patient_sex: PatientSex | None = Field(
+        default=None,
+        examples=[PatientSex.FEMALE],
+        description='Patient sex as it appears in the document',
+    )
+    insurance_type: InsuranceType | None = Field(
+        default=None,
+        examples=[InsuranceType.MEDICARE],
+        description=(
+            'Type of insurance/payer. Options: medicare, medicaid, '
+            'tricare, champva, group_health_plan, feca_black_lung, other'
+        ),
+    )
+    insurance_payer_name: str | None = Field(
+        default=None,
+        examples=['Medicare', 'Blue Cross Blue Shield'],
+        description='Name of the insurance carrier/payer',
+    )
+    insured_id_number: str | None = Field(
+        default=None,
+        examples=['1EG4-TE5-MK72'],
+        description=(
+            "Insured's ID/member number. Usually the same as the patient's "
+            'Medicare Beneficiary Identifier when the patient is the '
+            'insured'
+        ),
+    )
+    insured_name: str | None = Field(
+        default=None,
+        examples=['John Doe'],
+        description=(
+            "Insured's name, only if different from the patient "
+            '(e.g., patient is a dependent/spouse of the insured)'
+        ),
+    )
+    patient_relationship_to_insured: PatientRelationshipToInsured | None = (
+        Field(
+            default=None,
+            examples=[PatientRelationshipToInsured.SELF],
+            description=(
+                "Patient's relationship to the insured. Options: self, "
+                'spouse, child, other. Defaults to "self" for most '
+                'Medicare beneficiaries'
+            ),
+        )
     )
     confidence_score: float | None = Field(
         default=None,
