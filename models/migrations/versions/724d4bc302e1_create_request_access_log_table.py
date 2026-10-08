@@ -12,6 +12,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = '724d4bc302e1'
@@ -61,7 +62,7 @@ def upgrade() -> None:
         ),
         sa.Column(
             'action',
-            sa.Enum(
+            postgresql.ENUM(
                 'VIEW',
                 'DOWNLOAD_NOVITAS_PACKAGE',
                 'DOWNLOAD_CALL_SHEET',
