@@ -77,9 +77,10 @@ class PDFGeneratorService:
         beneficiary being transported) and the organization (the
         rendering/ambulance provider's own billing identity - NPI,
         address, and contact info, which don't vary per request). The
-        output is flattened (fields baked into static page content, no
-        JavaScript or interactive Submit button) before it's faxed or
-        downloaded, since this document carries PHI.
+        output stays a live, editable form - the template has no
+        JavaScript and no Submit button to strip (unlike the Call Sheet
+        template), and the business workflow requires a fillable cover
+        sheet so last-minute corrections can be made before faxing.
 
         Args:
             request: AmbulanceRequest instance to source beneficiary and
@@ -93,7 +94,7 @@ class PDFGeneratorService:
                 Completed by" fields.
 
         Returns:
-            bytes: Flattened PDF file bytes.
+            bytes: PDF file bytes, pre-filled and still editable.
 
         Raises:
             FileNotFoundError: If the template PDF is missing.
@@ -182,11 +183,6 @@ class PDFGeneratorService:
                     widget.update()
                     filled_count += 1
 
-            # Flatten: bake filled values into permanent page content and
-            # strip all form interactivity (including any JavaScript tied
-            # to the template's Submit button) before this PHI document
-            # leaves the system.
-            doc.bake(annots=True, widgets=True)  # type: ignore[attr-defined]
             pdf_bytes: bytes = doc.tobytes()
         finally:
             doc.close()
