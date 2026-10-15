@@ -61,6 +61,10 @@ class TestOrganizationService:
         updated_org.provider_type = update_data.provider_type
         updated_org.professional_id = update_data.professional_id
         updated_org.user_id = user_id
+        updated_org.npi = None
+        updated_org.address = None
+        updated_org.phone = None
+        updated_org.fax = None
 
         mock_organization_dao.update_by_user_id.return_value = updated_org
 
@@ -95,6 +99,10 @@ class TestOrganizationService:
         new_org.provider_type = update_data.provider_type
         new_org.professional_id = update_data.professional_id
         new_org.user_id = user_id
+        new_org.npi = None
+        new_org.address = None
+        new_org.phone = None
+        new_org.fax = None
 
         mock_organization_dao.create.return_value = new_org
 

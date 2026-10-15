@@ -345,6 +345,20 @@ class AmbulanceRequest(BaseIdMixin, BaseTimeStampMixin, SoftDelete):
             'PDF is generated'
         ),
     )
+    number_of_trips: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment=(
+            'Number of trips requested under this repetitive authorization '
+            '(Novitas Form 13614), not to exceed 80 in 60 days'
+        ),
+    )
+    authorization_start_date: Mapped[date | None] = mapped_column(
+        Date,
+        nullable=True,
+        comment='Start date of the requested authorization period '
+        '(Novitas Form 13614)',
+    )
 
     # Relationships
     reviewer: Mapped['User | None'] = relationship(

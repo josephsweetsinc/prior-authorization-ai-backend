@@ -697,6 +697,8 @@ class TestAmbulanceRequestEndpoints:
                 novitas_status=NovitasStatus.NOT_SUBMITTED,
                 novitas_submitted_at=None,
                 call_sheet_data=None,
+                number_of_trips=None,
+                authorization_start_date=None,
                 created_at=datetime(2025, 1, 1, 0, 0, 0),
                 updated_at=datetime(2025, 1, 2, 0, 0, 0),
                 status_history=[
@@ -788,8 +790,6 @@ class TestAmbulanceRequestEndpoints:
                 AdminRequestWithStatusHistorySchema,
                 CompletionStatus,
                 CompletionStatusSchema,
-                RequestDocumentSchema,
-                RequestStatusHistoryResponseSchema,
             )
 
             mock_update.return_value = AdminRequestWithStatusHistorySchema(
@@ -827,6 +827,8 @@ class TestAmbulanceRequestEndpoints:
                 novitas_status=NovitasStatus.NOT_SUBMITTED,
                 novitas_submitted_at=None,
                 call_sheet_data=None,
+                number_of_trips=None,
+                authorization_start_date=None,
                 created_at=datetime(2025, 1, 1, 0, 0, 0),
                 updated_at=datetime(2025, 1, 2, 0, 0, 0),
                 status_history=[],

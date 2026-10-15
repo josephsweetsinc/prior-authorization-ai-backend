@@ -382,6 +382,23 @@ class CreateAmbulanceRequestSchema(BaseModel):
             description="Patient's relationship to insured (CMS-1500 Box 6)",
         )
     )
+    number_of_trips: int | None = Field(
+        None,
+        examples=[12],
+        description=(
+            'Number of trips requested under this repetitive '
+            'authorization (Novitas Form 13614), not to exceed 80 in '
+            '60 days'
+        ),
+    )
+    authorization_start_date: date | None = Field(
+        None,
+        examples=[date(2025, 12, 6)],
+        description=(
+            'Start date of the requested authorization period '
+            '(Novitas Form 13614)'
+        ),
+    )
 
 
 class AmbulanceRequestResponseSchema(BaseModel):
@@ -497,6 +514,26 @@ class AmbulanceRequestResponseSchema(BaseModel):
             description=(
                 'Interactively-entered Call Sheet field values, keyed by '
                 'the template field name'
+            ),
+        ),
+    ]
+    number_of_trips: Annotated[
+        int | None,
+        Field(
+            default=None,
+            description=(
+                'Number of trips requested under this repetitive '
+                'authorization (Novitas Form 13614)'
+            ),
+        ),
+    ]
+    authorization_start_date: Annotated[
+        date | None,
+        Field(
+            default=None,
+            description=(
+                'Start date of the requested authorization period '
+                '(Novitas Form 13614)'
             ),
         ),
     ]
@@ -624,6 +661,8 @@ class AdminRequestWithStatusHistorySchema(BaseModel):
     novitas_status: NovitasStatus
     novitas_submitted_at: datetime | None
     call_sheet_data: dict[str, str] | None
+    number_of_trips: int | None
+    authorization_start_date: date | None
     created_at: datetime
     updated_at: datetime
     status_history: list[RequestStatusHistoryResponseSchema] = []
@@ -818,6 +857,21 @@ class AdminUpdateRequestSchema(BaseModel):
     ]
     patient_relationship_to_insured: PatientRelationshipToInsured | None = (
         None
+    )
+    number_of_trips: int | None = Field(
+        default=None,
+        description=(
+            'Number of trips requested under this repetitive '
+            'authorization (Novitas Form 13614), not to exceed 80 in '
+            '60 days'
+        ),
+    )
+    authorization_start_date: date | None = Field(
+        default=None,
+        description=(
+            'Start date of the requested authorization period '
+            '(Novitas Form 13614)'
+        ),
     )
     denial_reason: DenialReason | None = None
     denial_notes: Annotated[
