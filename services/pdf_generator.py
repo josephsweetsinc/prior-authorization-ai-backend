@@ -19,12 +19,6 @@ DEFAULT_TEMPLATE_PATH = (
     / 'novitas_form_13614.pdf'
 )
 
-# Only these two HCPCS codes are selectable on the real form (it's
-# constrained to non-emergency ambulance transport). The user has asked
-# to always default to A0428 (BLS non-emergency) for now and correct it
-# by hand before faxing when a request actually needs A0426 (ALS).
-DEFAULT_PROCEDURE_CODE = 'A0428'
-
 # The form's State combo box is constrained to the Novitas jurisdiction's
 # states; an unrecognized/unparseable value is left blank rather than
 # guessed, consistent with not inventing placeholder data.
@@ -170,7 +164,7 @@ class PDFGeneratorService:
                     filled_count += 1
                     continue
                 if name == 'Procedure Code(s)':
-                    widget.field_value = DEFAULT_PROCEDURE_CODE
+                    widget.field_value = request.procedure_code.value
                     widget.update()
                     filled_count += 1
                     continue

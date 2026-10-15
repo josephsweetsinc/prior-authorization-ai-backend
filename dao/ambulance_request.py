@@ -11,6 +11,7 @@ from models.ambulance_request import (
     InsuranceType,
     PatientRelationshipToInsured,
     PatientSex,
+    ProcedureCode,
     RequestStatus,
     RequestStatusHistory,
 )
@@ -53,6 +54,7 @@ class AmbulanceRequestDAO(BaseDAO):
         ) = None,
         number_of_trips: int | None = None,
         authorization_start_date: date | None = None,
+        procedure_code: ProcedureCode = ProcedureCode.A0428,
     ) -> AmbulanceRequest:
         """Create a new ambulance request.
 
@@ -89,6 +91,8 @@ class AmbulanceRequestDAO(BaseDAO):
                 authorization (optional).
             authorization_start_date: Start date of the requested
                 authorization period (optional).
+            procedure_code: HCPCS procedure code for the Novitas cover
+                sheet (default: A0428).
 
         Returns:
             AmbulanceRequest: Created request instance.
@@ -123,6 +127,7 @@ class AmbulanceRequestDAO(BaseDAO):
             patient_relationship_to_insured=patient_relationship_to_insured,
             number_of_trips=number_of_trips,
             authorization_start_date=authorization_start_date,
+            procedure_code=procedure_code,
         )
         self._session.add(request)
         await self._session.flush()

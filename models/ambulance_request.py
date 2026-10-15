@@ -68,6 +68,17 @@ class NovitasStatus(StrEnum):
     DENIED = 'denied'
 
 
+class ProcedureCode(StrEnum):
+    """HCPCS procedure code for the Novitas Form 13614 cover sheet.
+
+    These are the only two codes selectable on the real form, which is
+    scoped to non-emergency ambulance transport.
+    """
+
+    A0428 = 'A0428'  # BLS (Basic Life Support), non-emergency
+    A0426 = 'A0426'  # ALS (Advanced Life Support), non-emergency
+
+
 class DenialReason(StrEnum):
     """Enumeration of denial reasons."""
 
@@ -358,6 +369,13 @@ class AmbulanceRequest(BaseIdMixin, BaseTimeStampMixin, SoftDelete):
         nullable=True,
         comment='Start date of the requested authorization period '
         '(Novitas Form 13614)',
+    )
+    procedure_code: Mapped['ProcedureCode'] = mapped_column(
+        Enum(ProcedureCode),
+        nullable=False,
+        server_default=ProcedureCode.A0428.value,
+        comment='HCPCS procedure code for the Novitas Form 13614 cover '
+        'sheet (A0428 BLS or A0426 ALS, non-emergency)',
     )
 
     # Relationships

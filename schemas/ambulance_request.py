@@ -16,6 +16,7 @@ from models.ambulance_request import (
     NovitasStatus,
     PatientRelationshipToInsured,
     PatientSex,
+    ProcedureCode,
     RequestStatus,
     TransportationType,
 )
@@ -399,6 +400,15 @@ class CreateAmbulanceRequestSchema(BaseModel):
             '(Novitas Form 13614)'
         ),
     )
+    procedure_code: ProcedureCode | None = Field(
+        None,
+        examples=[ProcedureCode.A0428],
+        description=(
+            'HCPCS procedure code for the Novitas Form 13614 cover sheet '
+            '(A0428 BLS or A0426 ALS, non-emergency). Defaults to A0428 '
+            'when unset.'
+        ),
+    )
 
 
 class AmbulanceRequestResponseSchema(BaseModel):
@@ -537,6 +547,16 @@ class AmbulanceRequestResponseSchema(BaseModel):
             ),
         ),
     ]
+    procedure_code: Annotated[
+        ProcedureCode,
+        Field(
+            default=ProcedureCode.A0428,
+            description=(
+                'HCPCS procedure code for the Novitas Form 13614 cover '
+                'sheet (A0428 BLS or A0426 ALS, non-emergency)'
+            ),
+        ),
+    ]
     created_at: datetime
     updated_at: datetime
 
@@ -663,6 +683,7 @@ class AdminRequestWithStatusHistorySchema(BaseModel):
     call_sheet_data: dict[str, str] | None
     number_of_trips: int | None
     authorization_start_date: date | None
+    procedure_code: ProcedureCode = ProcedureCode.A0428
     created_at: datetime
     updated_at: datetime
     status_history: list[RequestStatusHistoryResponseSchema] = []
@@ -871,6 +892,13 @@ class AdminUpdateRequestSchema(BaseModel):
         description=(
             'Start date of the requested authorization period '
             '(Novitas Form 13614)'
+        ),
+    )
+    procedure_code: ProcedureCode | None = Field(
+        default=None,
+        description=(
+            'HCPCS procedure code for the Novitas Form 13614 cover sheet '
+            '(A0428 BLS or A0426 ALS, non-emergency)'
         ),
     )
     denial_reason: DenialReason | None = None

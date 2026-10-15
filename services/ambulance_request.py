@@ -664,6 +664,8 @@ class AmbulanceRequestService(BaseService):
             request.authorization_start_date = (
                 request_data.authorization_start_date
             )
+        if request_data.procedure_code is not None:
+            request.procedure_code = request_data.procedure_code
 
         # Check if request can be submitted (uses request state we just set)
         completion_status = await self.get_completion_status(request=request)
@@ -899,6 +901,7 @@ class AmbulanceRequestService(BaseService):
                 call_sheet_data=request.call_sheet_data,
                 number_of_trips=request.number_of_trips,
                 authorization_start_date=request.authorization_start_date,
+                procedure_code=request.procedure_code,
                 created_at=request.created_at,
                 updated_at=request.updated_at,
                 status_history=status_history_schemas,
@@ -923,6 +926,7 @@ class AmbulanceRequestService(BaseService):
             call_sheet_data=request.call_sheet_data,
             number_of_trips=request.number_of_trips,
             authorization_start_date=request.authorization_start_date,
+            procedure_code=request.procedure_code,
             created_at=request.created_at,
             updated_at=request.updated_at,
             status_history=status_history_schemas,
@@ -1624,6 +1628,8 @@ Necessity document, or "NO" if it is not."""
             request.authorization_start_date = (
                 update_data.authorization_start_date
             )
+        if update_data.procedure_code is not None:
+            request.procedure_code = update_data.procedure_code
         if update_data.denial_reason is not None:
             request.denial_reason = update_data.denial_reason
         if update_data.denial_notes is not None:
@@ -1723,6 +1729,7 @@ Necessity document, or "NO" if it is not."""
             call_sheet_data=request.call_sheet_data,
             number_of_trips=request.number_of_trips,
             authorization_start_date=request.authorization_start_date,
+            procedure_code=request.procedure_code,
             created_at=request.created_at,
             updated_at=request.updated_at,
             status_history=status_history_schemas,

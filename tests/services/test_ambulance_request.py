@@ -26,6 +26,7 @@ from exceptions import (
 from exceptions.file import IncorrectFileSizeException, UnknownFiletypeException
 from models.ambulance_request import (
     NovitasStatus,
+    ProcedureCode,
     RequestStatus,
     TransportationType,
 )
@@ -985,6 +986,7 @@ class TestAmbulanceRequestService:
         request.call_sheet_data = None
         request.number_of_trips = None
         request.authorization_start_date = None
+        request.procedure_code = ProcedureCode.A0428
         request.created_at = datetime.now(UTC)
         request.updated_at = datetime.now(UTC)
         request.reviewer_id = None
