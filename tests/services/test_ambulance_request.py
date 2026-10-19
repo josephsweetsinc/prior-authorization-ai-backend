@@ -18,6 +18,7 @@ from exceptions import (
     AmbulanceRequestAllFilesUploadFailedException,
     AmbulanceRequestEmptyDocumentEmtpyException,
     AmbulanceRequestEmptyDocumentFileNameException,
+    AmbulanceRequestInvalidFileIdsException,
     AmbulanceRequestInvalidStatusException,
     AmbulanceRequestNotFoundException,
     AmbulanceRequestPDFGenerationException,
@@ -390,6 +391,81 @@ class TestAmbulanceRequestService:
             await service.create_request(
                 user_id=user.id, request_data=request_data
             )
+
+    @pytest.mark.asyncio
+    async def test_create_request_rejects_file_owned_by_another_user(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        db_session,
+    ):
+        """Test that submitting can't claim another user's uploaded file.
+
+        Without ownership scoping on the file-linking step, any
+        authenticated user could pass another user's file_id in
+        request_data.file_ids and have it reassigned onto their own
+        request, including a file already attached to someone else's
+        request.
+        """
+        owner = await user_factory(email='file-owner@example.com')
+        attacker = await user_factory(email='file-attacker@example.com')
+        await db_session.commit()
+
+        # The victim's own file, uploaded under their own account.
+        victim_file = UploadFile(
+            filename='victim.pdf', file=BytesIO(b'victim content')
+        )
+        victim_upload = await service.upload_file(
+            file=victim_file, user_id=owner.id
+        )
+        await db_session.commit()
+
+        # The attacker creates their own draft request to submit.
+        from schemas.ambulance_request import CreateAmbulanceRequestParseSchema
+
+        attacker_file = UploadFile(
+            filename='attacker.pdf', file=BytesIO(b'attacker content')
+        )
+        attacker_upload = await service.upload_file(
+            file=attacker_file, user_id=attacker.id
+        )
+        await db_session.commit()
+        parse_data = CreateAmbulanceRequestParseSchema(
+            file_ids=[attacker_upload.id]
+        )
+        draft_result = await service.create_request_with_extraction(
+            request_data=parse_data, user_id=attacker.id
+        )
+        await db_session.commit()
+
+        request_data = CreateAmbulanceRequestSchema(
+            request_id=draft_result.request_id,
+            file_ids=[victim_upload.id],  # Not the attacker's file.
+            transportation_type=TransportationType.AMBULANCE,
+            patient_first_name='John',
+            patient_last_name='Doe',
+            patient_date_of_birth=date(1980, 1, 1),
+            patient_id='DA123456789HY',
+            date_of_transport=date(2025, 12, 6),
+            time_of_transport=time(13, 40),
+            pickup_address='123 Main St',
+            destination_address='456 Medical Dr',
+            primary_diagnosis='Chronic heart failure',
+            medical_justification='Patient requires transport',
+            form_number='CMS-13614',
+            ordering_physician='Dr. Smith',
+        )
+
+        with pytest.raises(AmbulanceRequestInvalidFileIdsException):
+            await service.create_request(
+                user_id=attacker.id, request_data=request_data
+            )
+
+        # The victim's file must stay unlinked, not stolen.
+        file_dao = RequestFileDAO(db_session)
+        found = await file_dao.get_by_id(victim_upload.id)
+        assert found is not None
+        assert found.request_id is None
 
     @pytest.mark.asyncio
     async def test_get_request_by_id_success(

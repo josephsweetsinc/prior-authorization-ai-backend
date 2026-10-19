@@ -223,6 +223,7 @@ class AmbulanceRequestService(BaseService):
         request_file = await self._file_dao.create(
             request_id=None,
             # Temporary, will be updated when request is created
+            uploaded_by_user_id=user_id,
             filename=file.filename or 'unknown',
             s3_key=s3_key,
             file_size=file_size,
@@ -389,7 +390,8 @@ class AmbulanceRequestService(BaseService):
 
         """
         file_records: list[RequestFile] = await self._file_dao.get_by_ids(
-            request_data.file_ids
+            request_data.file_ids,
+            uploaded_by_user_id=user_id,
         )
         # Matches file_records by id for better perf
         file_records_by_id = {
@@ -435,6 +437,7 @@ class AmbulanceRequestService(BaseService):
             await self._file_dao.update_request_id(
                 file_id=file_id,
                 request_id=draft_request.id,
+                uploaded_by_user_id=user_id,
             )
         await self._session.commit()
         await self._session.refresh(draft_request)
@@ -666,16 +669,35 @@ class AmbulanceRequestService(BaseService):
         request.status = RequestStatus.SUBMITTED
         await self._session.flush()
 
-        # Link any additional files provided in request_data
+        # Link any additional files provided in request_data. Scoped to
+        # files uploaded_by_user_id == user_id and not already linked -
+        # otherwise any authenticated user could reassign an arbitrary
+        # file_id, including one already attached to another user's
+        # request, onto their own.
         if request_data.file_ids:
+            owned_files = await self._file_dao.get_by_ids(
+                request_data.file_ids,
+                uploaded_by_user_id=user_id,
+            )
+            unlinked_owned_file_ids = {
+                file_record.id
+                for file_record in owned_files
+                if file_record.request_id is None
+            }
+            invalid_file_ids = [
+                file_id
+                for file_id in request_data.file_ids
+                if file_id not in unlinked_owned_file_ids
+            ]
+            if invalid_file_ids:
+                raise AmbulanceRequestInvalidFileIdsException(
+                    invalid_file_ids=invalid_file_ids
+                )
             for file_id in request_data.file_ids:
-                # Check if file exists and belongs to user happens in file_dao usually, but checking here
-                # We trust file_ids are valid for the user or we should validate them.
-                # Ideally we should validate them, but for now we just link them.
-                # Assuming valid IDs from frontend.
                 await self._file_dao.update_request_id(
                     file_id=file_id,
                     request_id=request.id,
+                    uploaded_by_user_id=user_id,
                 )
 
         await self._status_history_dao.create(
