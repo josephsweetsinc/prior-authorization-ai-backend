@@ -341,7 +341,7 @@ class TestAmbulanceRequestService:
         draft_ai_accuracy = draft_request.ai_accuracy
 
         result = await service.create_request(
-            user_id=user.id, request_data=request_data
+            user=user, request_data=request_data
         )
 
         assert result.id is not None
@@ -388,7 +388,7 @@ class TestAmbulanceRequestService:
 
         with pytest.raises(AmbulanceRequestNotFoundException):
             await service.create_request(
-                user_id=user.id, request_data=request_data
+                user=user, request_data=request_data
             )
 
     @pytest.mark.asyncio
@@ -435,7 +435,7 @@ class TestAmbulanceRequestService:
             ordering_physician='Dr. Smith',  # Physician Signature is required
         )
         created = await service.create_request(
-            user_id=user.id, request_data=request_data
+            user=user, request_data=request_data
         )
         await db_session.commit()
 
@@ -508,7 +508,7 @@ class TestAmbulanceRequestService:
             ordering_physician='Dr. Smith',  # Physician Signature is required
         )
         created = await service.create_request(
-            user_id=user1.id, request_data=request_data
+            user=user1, request_data=request_data
         )
         await db_session.commit()
 
@@ -563,7 +563,7 @@ class TestAmbulanceRequestService:
             ordering_physician='Dr. Smith',  # Physician Signature is required
         )
         created = await service.create_request(
-            user_id=user1.id, request_data=request_data
+            user=user1, request_data=request_data
         )
         await db_session.commit()
 
@@ -623,7 +623,7 @@ class TestAmbulanceRequestService:
                 ordering_physician='Dr. Smith',  # Physician Signature is required
             )
             await service.create_request(
-                user_id=user1.id, request_data=request_data
+                user=user1, request_data=request_data
             )
             await db_session.commit()
 
@@ -659,7 +659,7 @@ class TestAmbulanceRequestService:
             ordering_physician='Dr. Smith',  # Physician Signature is required
         )
         await service.create_request(
-            user_id=user2.id, request_data=request_data
+            user=user2, request_data=request_data
         )
         await db_session.commit()
 
@@ -726,7 +726,7 @@ class TestAmbulanceRequestService:
                 ordering_physician='Dr. Smith',  # Physician Signature is required
             )
             await service.create_request(
-                user_id=user.id, request_data=request_data
+                user=user, request_data=request_data
             )
             await db_session.commit()
 
@@ -796,7 +796,7 @@ class TestAmbulanceRequestService:
                 ordering_physician='Dr. Smith',  # Physician Signature is required
             )
             await service.create_request(
-                user_id=user.id, request_data=request_data
+                user=user, request_data=request_data
             )
             await db_session.commit()
 
@@ -874,7 +874,7 @@ class TestAmbulanceRequestService:
             ordering_physician='Dr. Smith',  # Physician Signature is required
         )
         created = await service.create_request(
-            user_id=user.id, request_data=request_data
+            user=user, request_data=request_data
         )
         await db_session.commit()
 
@@ -1506,6 +1506,112 @@ class TestCreateDraftRequestFromFax:
         service = self._make_service(db_session, mock_ai_service_success)
         draft = await service.create_draft_request_from_fax(999999)
         assert draft is None
+
+    @pytest.mark.asyncio
+    async def test_any_admin_can_submit_a_fax_originated_draft(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_success,
+    ):
+        """Test that a fax-originated draft can actually be submitted.
+
+        A fax-created draft is owned by the system's resolved
+        fax-intake admin account, not by any provider. Without an
+        admin override on create_request, no one could ever submit
+        it: the provider-only endpoint can't act on an admin-owned
+        request, and the admin who owns it is barred by the
+        provider-only role check - a permanent deadlock. This
+        reproduces the full flow to prove a (different) reviewing
+        admin can now submit it.
+        """
+        await user_factory(email='admin@example.com', role=UserRole.ADMIN)
+        reviewing_admin = await user_factory(
+            email='reviewer@example.com', role=UserRole.ADMIN
+        )
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-deadlock',
+            s3_key='faxes/inbound/rc-draft-deadlock.pdf',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(fax.id)
+        await db_session.commit()
+
+        request_data = CreateAmbulanceRequestSchema(
+            request_id=draft.id,
+            transportation_type=TransportationType.AMBULANCE,
+            patient_first_name='John',
+            patient_last_name='Doe',
+            patient_date_of_birth=date(1980, 1, 1),
+            patient_id='DA123456789HY',
+            date_of_transport=date(2025, 12, 6),
+            time_of_transport=time(13, 40),
+            pickup_address='123 Main St',
+            destination_address='456 Medical Dr',
+            primary_diagnosis='Chronic heart failure',
+            medical_justification='Patient requires transport',
+            form_number='CMS-13614',
+            ordering_physician='Dr. Smith',
+        )
+
+        result = await service.create_request(
+            user=reviewing_admin, request_data=request_data
+        )
+
+        assert result.status == RequestStatus.SUBMITTED
+
+    @pytest.mark.asyncio
+    async def test_unrelated_provider_cannot_submit_a_fax_originated_draft(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_success,
+    ):
+        """Test that the admin override doesn't open the draft to anyone.
+
+        A provider who doesn't own the draft still can't submit it -
+        only an admin override, or the actual owner, should bypass
+        the ownership check.
+        """
+        await user_factory(email='admin@example.com', role=UserRole.ADMIN)
+        unrelated_provider = await user_factory(
+            email='unrelated@example.com', role=UserRole.PROVIDER
+        )
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-unrelated',
+            s3_key='faxes/inbound/rc-draft-unrelated.pdf',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(fax.id)
+        await db_session.commit()
+
+        request_data = CreateAmbulanceRequestSchema(
+            request_id=draft.id,
+            transportation_type=TransportationType.AMBULANCE,
+            patient_first_name='John',
+            patient_last_name='Doe',
+            patient_date_of_birth=date(1980, 1, 1),
+            patient_id='DA123456789HY',
+            date_of_transport=date(2025, 12, 6),
+            time_of_transport=time(13, 40),
+            pickup_address='123 Main St',
+            destination_address='456 Medical Dr',
+            primary_diagnosis='Chronic heart failure',
+            medical_justification='Patient requires transport',
+            form_number='CMS-13614',
+            ordering_physician='Dr. Smith',
+        )
+
+        with pytest.raises(AmbulanceRequestPermissionException):
+            await service.create_request(
+                user=unrelated_provider, request_data=request_data
+            )
 
 
 class TestGenerateCms1500Pdf:

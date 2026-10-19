@@ -577,26 +577,35 @@ class AmbulanceRequestService(BaseService):
 
     async def create_request(  # noqa: C901,PLR0912, PLR0915
         self,
-        user_id: int,
+        user: User,
         request_data: CreateAmbulanceRequestSchema,
     ) -> AmbulanceRequestResponseSchema:
         """Update draft request and submit it.
 
+        A draft can be submitted by the provider who owns it, or by any
+        admin - the latter is required for a fax-originated draft,
+        which is owned by the system's resolved fax-intake admin
+        account (see create_draft_request_from_fax) rather than by any
+        provider, so without an admin override no one could ever
+        submit it.
+
         Args:
-            user_id: ID of the user creating the request.
+            user: The user submitting the request - either the
+                provider who owns the draft, or any admin.
             request_data: Request data with request_id of draft to update.
 
         Returns:
             AmbulanceRequestResponseSchema: Updated and submitted request.
 
         """
+        user_id = user.id
         # Get existing draft request
         request = await self._request_dao.get_by_id(
             request_id=request_data.request_id,
         )
         if not request:
             raise AmbulanceRequestNotFoundException
-        if request.user_id != user_id:
+        if request.user_id != user_id and user.role != UserRole.ADMIN:
             raise AmbulanceRequestPermissionException
         if request.status != RequestStatus.DRAFT:
             raise AmbulanceRequestInvalidStatusException(  # noqa: TRY003
