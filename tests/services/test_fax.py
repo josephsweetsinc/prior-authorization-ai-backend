@@ -149,6 +149,78 @@ class TestFaxService:
         mock_process_inbound_fax_task.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_create_fax_idempotently_recovers_from_race(
+        self, service, db_session
+    ):
+        """Test that a concurrent duplicate insert is recovered from.
+
+        process_inbound_message's existing-record check and the
+        create() call aren't atomic, so a genuinely concurrent
+        redelivery of the same webhook event can pass that check
+        twice before either commits. The second insert then hits the
+        unique constraint on provider_message_id - this should
+        recover by returning the record the other call created,
+        rather than raising.
+        """
+        fax_dao = IncomingFaxDAO(db_session)
+        winner = await fax_dao.create(
+            provider_message_id='rc-race-1',
+            direction=FaxDirection.INBOUND,
+            status=FaxStatus.RECEIVED,
+        )
+        await db_session.commit()
+
+        fax, created = await service._create_fax_idempotently(  # noqa: SLF001
+            provider_message_id='rc-race-1',
+            direction=FaxDirection.INBOUND,
+            status=FaxStatus.RECEIVED,
+        )
+
+        assert created is False
+        assert fax.id == winner.id
+
+    @pytest.mark.asyncio
+    async def test_process_inbound_message_race_does_not_double_trigger(
+        self,
+        service,
+        mock_ringcentral_client,
+        mock_process_inbound_fax_task,
+        db_session,
+    ):
+        """Test that losing the creation race doesn't re-enqueue
+        processing for the fax the other request already created.
+        """  # noqa: D205
+        fax_dao = IncomingFaxDAO(db_session)
+        winner = await fax_dao.create(
+            provider_message_id='rc-race-2',
+            direction=FaxDirection.INBOUND,
+            status=FaxStatus.RECEIVED,
+        )
+        await db_session.commit()
+
+        # The existing-record check in process_inbound_message only
+        # sees this row if it runs after the winner's commit; simulate
+        # the race by removing it from that lookup (as if the winner's
+        # row weren't visible yet) while leaving the unique constraint
+        # itself in place to reject the duplicate insert.
+        original_get_by_id = fax_dao.get_by_provider_message_id
+        call_count = 0
+
+        async def flaky_lookup(provider_message_id: str):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return None
+            return await original_get_by_id(provider_message_id)
+
+        service._fax_dao.get_by_provider_message_id = flaky_lookup  # noqa: SLF001
+
+        fax = await service.process_inbound_message('rc-race-2')
+
+        assert fax.id == winner.id
+        mock_process_inbound_fax_task.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_process_inbound_message_no_attachment(
         self, service, mock_ringcentral_client, mock_process_inbound_fax_task
     ):
