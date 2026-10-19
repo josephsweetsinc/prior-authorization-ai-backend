@@ -1,6 +1,6 @@
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, Integer, String
+from sqlalchemy import Boolean, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.models import BaseIdMixin, BaseTimeStampMixin
@@ -18,6 +18,8 @@ class RequestFile(BaseIdMixin, BaseTimeStampMixin):
     - s3_key: S3 object key (path in S3 bucket).
     - file_size: File size in bytes.
     - content_type: MIME type of the file.
+    - is_verification_of_medical_necessity: Cached AI content-check
+      result (None until checked once).
     """
 
     __tablename__ = 'request_files'
@@ -47,6 +49,16 @@ class RequestFile(BaseIdMixin, BaseTimeStampMixin):
         String(100),
         nullable=False,
         comment='MIME type of the file',
+    )
+    is_verification_of_medical_necessity: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+        comment=(
+            'Whether this file is a Verification of Medical Necessity '
+            'document, per a one-time AI content check. NULL means not '
+            'yet checked - cached so the (costly, per-file) check runs '
+            'once per file rather than on every completion-status check'
+        ),
     )
 
     # Relationships

@@ -78,6 +78,14 @@ MIN_NAME_LENGTH = 3
 MIN_ADDRESS_LENGTH = 5
 EMPTY_FILE_SIZE = 0
 MIN_TOTAL_COUNT = 0
+
+# Placeholder defaults _build_draft_request_kwargs fills in for fields
+# the AI couldn't extract, so a draft can be created for review rather
+# than blocking on missing data. get_completion_status treats these as
+# not actually filled in, the same way it already treats 'Pending'
+# addresses, so a request can't be submitted on placeholder data.
+PLACEHOLDER_PATIENT_NAME = 'Unknown'
+PLACEHOLDER_PATIENT_ID = 'TBD'
 DEFAULT_ADMIN_LIMIT = 1000
 PRESIGNED_URL_EXPIRATION = 3600  # 1 hour in seconds
 
@@ -1068,7 +1076,10 @@ class AmbulanceRequestService(BaseService):
 
         # Check required fields
         # Basic patient information
-        if not request.patient_first_name:
+        if (
+            not request.patient_first_name
+            or request.patient_first_name == PLACEHOLDER_PATIENT_NAME
+        ):
             required_fields.append(
                 CompletionStatusItem(
                     name='Patient First Name',
@@ -1092,7 +1103,10 @@ class AmbulanceRequestService(BaseService):
                 )
             )
 
-        if not request.patient_last_name:
+        if (
+            not request.patient_last_name
+            or request.patient_last_name == PLACEHOLDER_PATIENT_NAME
+        ):
             required_fields.append(
                 CompletionStatusItem(
                     name='Patient Last Name',
@@ -1116,7 +1130,10 @@ class AmbulanceRequestService(BaseService):
                 )
             )
 
-        if not request.patient_id:
+        if (
+            not request.patient_id
+            or request.patient_id == PLACEHOLDER_PATIENT_ID
+        ):
             required_fields.append(
                 CompletionStatusItem(
                     name='Patient ID',
@@ -1189,14 +1206,29 @@ class AmbulanceRequestService(BaseService):
         # Check required documents
         files = await self._file_dao.get_by_request_id(request_id=request.id)
 
-        # Check for Verification of Medical Necessity document by content
-        # Check for Verification of Medical Necessity document by content
-        # Note: We are no longer checking for this as a mandatory requirement
-        # to save on LLM costs and reduce friction
-        # has_verification = await self._check_verification_document_by_content(
-        #     files=files,
-        #     form_number=request.form_number,
-        # )
+        has_verification = await self._check_verification_document_by_content(
+            files=files,
+            form_number=request.form_number,
+        )
+        required_documents.append(
+            CompletionStatusItem(
+                name='Verification of Medical Necessity',
+                status=(
+                    CompletionStatus.COMPLETE
+                    if has_verification
+                    else CompletionStatus.MISSING
+                ),
+                message=(
+                    None
+                    if has_verification
+                    else (
+                        'A Verification of Medical Necessity document '
+                        '(e.g. CMS-13614) must be uploaded before this '
+                        'request can be submitted'
+                    )
+                ),
+            )
+        )
 
         # Filter only missing/incomplete items
         missing_fields = [
@@ -1244,7 +1276,7 @@ class AmbulanceRequestService(BaseService):
             can_submit=can_submit,
         )
 
-    async def _check_verification_document_by_content(
+    async def _check_verification_document_by_content(  # noqa: C901, PLR0912
         self,
         files: list[RequestFile],
         form_number: str | None,
@@ -1253,7 +1285,11 @@ class AmbulanceRequestService(BaseService):
 
         This method analyzes document content using AI to determine if any
         of the uploaded files contains Verification of Medical Necessity
-        information.
+        information. Per-file AI results are cached on the file row
+        (RequestFile.is_verification_of_medical_necessity) - this check
+        runs on every completion-status evaluation (e.g. every save and
+        every submit attempt), so without caching it would re-run a
+        vision-model call per file on every single call.
 
         Args:
             files: List of request files to check.
@@ -1281,7 +1317,7 @@ class AmbulanceRequestService(BaseService):
                 )
                 return True
 
-        # Check document content using AI for each file
+        # Check document content using AI for each file not yet checked
         verification_prompt = """You are a medical document analyst.
 Analyze the provided document and determine if it is a "Verification of
 Medical Necessity" form or document.
@@ -1298,6 +1334,16 @@ Respond with ONLY one word: "YES" if this is a Verification of Medical
 Necessity document, or "NO" if it is not."""
 
         for file in files:
+            if file.is_verification_of_medical_necessity is not None:
+                if file.is_verification_of_medical_necessity:
+                    logger.info(
+                        'Using cached Verification of Medical Necessity '
+                        'result for file: %s',
+                        file.filename,
+                    )
+                    return True
+                continue
+
             try:
                 # Download file from S3
                 (
@@ -1347,7 +1393,13 @@ Necessity document, or "NO" if it is not."""
                     response_text,
                 )
 
-                if 'YES' in response_text:
+                is_verification = 'YES' in response_text
+                await self._file_dao.set_verification_check_result(
+                    file_id=file.id,
+                    is_verification_of_medical_necessity=is_verification,
+                )
+
+                if is_verification:
                     logger.info(
                         'Found Verification of Medical Necessity in file: %s',
                         file.filename,
@@ -1362,7 +1414,10 @@ Necessity document, or "NO" if it is not."""
                     ),
                     file.filename,
                 )
-                # Continue checking other files if one fails
+                # Continue checking other files if one fails - and leave
+                # this file's cache unset, so a transient failure
+                # (download, LLM call) gets retried next time rather
+                # than being cached as a false negative.
                 continue
 
         return False

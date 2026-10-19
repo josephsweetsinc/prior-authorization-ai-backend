@@ -1014,6 +1014,190 @@ class TestAmbulanceRequestService:
         service._status_history_dao.create.assert_not_called()
 
 
+class TestGetCompletionStatus:
+    """Test suite for AmbulanceRequestService.get_completion_status().
+
+    Covers the submission gate's medical-necessity document check and
+    placeholder-value blocking - both previously disabled/dead, so
+    there was no existing coverage for either.
+    """
+
+    @pytest.fixture
+    def mock_ai_service(self) -> MagicMock:
+        """Create a mock AIExtractionService for the verification check."""
+        mock = MagicMock(spec=AIExtractionService)
+        mock._download_file_from_s3 = AsyncMock(
+            return_value=(b'fake pdf content', 'application/pdf')
+        )
+        mock._document_processor = MagicMock()
+        mock._document_processor.process_document = AsyncMock(
+            return_value=['fake-image']
+        )
+        mock._build_message_content = MagicMock(return_value=[])
+        mock._llm = MagicMock()
+        mock._llm.ainvoke = AsyncMock(return_value=MagicMock(content='NO'))
+        return mock
+
+    @pytest.fixture
+    def service(self, db_session, mock_ai_service) -> AmbulanceRequestService:
+        """Create AmbulanceRequestService instance with mocks."""
+        return AmbulanceRequestService(
+            db_session=db_session,
+            s3_actions=MagicMock(spec=S3Actions),
+            ai_extraction_service=mock_ai_service,
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_verification_document_blocks_submission(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+    ):
+        """Test that submission is blocked with no verification doc.
+
+        No uploaded files and a form_number that doesn't match CMS-13614
+        means the gate can't confirm medical necessity was documented.
+        """
+        user = await user_factory()
+        request = await ambulance_request_factory(
+            user_id=user.id, form_number='CMS-10344'
+        )
+
+        status = await service.get_completion_status(request=request)
+
+        assert status.can_submit is False
+        names = {item.name for item in status.missing_documents}
+        assert 'Verification of Medical Necessity' in names
+
+    @pytest.mark.asyncio
+    async def test_form_number_13614_satisfies_verification_without_ai_call(
+        self,
+        service: AmbulanceRequestService,
+        mock_ai_service,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test the cheap form_number fast path skips the AI call.
+
+        This is what existing create_request tests rely on to avoid
+        the LLM round-trip entirely - it still requires at least one
+        uploaded file (claiming a form number with nothing attached
+        isn't actually documentation), but doesn't need to inspect it.
+        """
+        user = await user_factory()
+        request = await ambulance_request_factory(
+            user_id=user.id, form_number='CMS-13614'
+        )
+        file_dao = RequestFileDAO(db_session)
+        await file_dao.create(
+            request_id=request.id,
+            filename='supporting-doc.pdf',
+            s3_key='users/1/supporting-doc.pdf',
+            file_size=1024,
+            content_type='application/pdf',
+        )
+        await db_session.commit()
+
+        status = await service.get_completion_status(request=request)
+
+        names = {item.name for item in status.missing_documents}
+        assert 'Verification of Medical Necessity' not in names
+        mock_ai_service._llm.ainvoke.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ai_detected_verification_document_satisfies_gate(
+        self,
+        service: AmbulanceRequestService,
+        mock_ai_service,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that an AI-detected verification document is accepted
+        and the result is cached on the file.
+        """  # noqa: D205
+        user = await user_factory()
+        request = await ambulance_request_factory(
+            user_id=user.id, form_number='CMS-10344'
+        )
+        mock_ai_service._llm.ainvoke = AsyncMock(
+            return_value=MagicMock(content='YES')
+        )
+        file_dao = RequestFileDAO(db_session)
+        request_file = await file_dao.create(
+            request_id=request.id,
+            filename='verification.pdf',
+            s3_key='users/1/verification.pdf',
+            file_size=1024,
+            content_type='application/pdf',
+        )
+        await db_session.commit()
+
+        status = await service.get_completion_status(request=request)
+
+        assert status.can_submit is True
+        mock_ai_service._llm.ainvoke.assert_called_once()
+
+        # Cached on the file, so a second check doesn't re-call the LLM.
+        found = await file_dao.get_by_id(request_file.id)
+        assert found.is_verification_of_medical_necessity is True
+
+        await service.get_completion_status(request=request)
+        mock_ai_service._llm.ainvoke.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_placeholder_patient_name_blocks_submission(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+    ):
+        """Test that the 'Unknown' placeholder name is treated as missing.
+
+        _build_draft_request_kwargs fills patient_first_name/last_name
+        with 'Unknown' when the AI couldn't extract a real value, so a
+        draft can still be created for review - but it must not be
+        treated as valid data at submission time.
+        """
+        user = await user_factory()
+        request = await ambulance_request_factory(
+            user_id=user.id,
+            patient_first_name='Unknown',
+            patient_last_name='Unknown',
+            form_number='CMS-13614',
+        )
+
+        status = await service.get_completion_status(request=request)
+
+        names = {item.name for item in status.missing_fields}
+        assert 'Patient First Name' in names
+        assert 'Patient Last Name' in names
+        assert status.can_submit is False
+
+    @pytest.mark.asyncio
+    async def test_placeholder_patient_id_blocks_submission(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+    ):
+        """Test that the 'TBD' placeholder patient ID is treated as missing."""
+        user = await user_factory()
+        request = await ambulance_request_factory(
+            user_id=user.id,
+            patient_id='TBD',
+            form_number='CMS-13614',
+        )
+
+        status = await service.get_completion_status(request=request)
+
+        names = {item.name for item in status.missing_fields}
+        assert 'Patient ID' in names
+        assert status.can_submit is False
+
+
 class TestGenerateCallSheetPdf:
     """Test suite for AmbulanceRequestService.generate_call_sheet_pdf()."""
 
