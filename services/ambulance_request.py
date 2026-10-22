@@ -12,6 +12,7 @@ from core import BaseService
 from dao import (
     AmbulanceRequestDAO,
     IncomingFaxDAO,
+    OrganizationDAO,
     RequestAccessLogDAO,
     RequestFileDAO,
     RequestStatusHistoryDAO,
@@ -102,6 +103,7 @@ class AmbulanceRequestService(BaseService):
         call_sheet_service: CallSheetService | None = None,
         cms1500_generator_service: CMS1500GeneratorService | None = None,
         fax_service: FaxService | None = None,
+        organization_dao: OrganizationDAO | None = None,
     ):
         """Initialize AmbulanceRequestService."""
         super().__init__(db_session)
@@ -112,6 +114,9 @@ class AmbulanceRequestService(BaseService):
         )
         self._incoming_fax_dao = incoming_fax_dao or IncomingFaxDAO(db_session)
         self._access_log_dao = access_log_dao or RequestAccessLogDAO(
+            db_session
+        )
+        self._organization_dao = organization_dao or OrganizationDAO(
             db_session
         )
         self._s3_actions = s3_actions or S3Actions()
@@ -172,6 +177,9 @@ class AmbulanceRequestService(BaseService):
                 request_id,
                 action,
             )
+            # A failed commit leaves the session's transaction aborted;
+            # roll back so later queries on this session don't also fail.
+            await self._session.rollback()
 
     async def upload_file(
         self,
@@ -358,6 +366,8 @@ class AmbulanceRequestService(BaseService):
             'patient_relationship_to_insured': (
                 extracted.patient_relationship_to_insured
             ),
+            'number_of_trips': extracted.number_of_trips,
+            'authorization_start_date': extracted.authorization_start_date,
         }
 
     async def create_request_with_extraction(
@@ -648,6 +658,14 @@ class AmbulanceRequestService(BaseService):
             request.patient_relationship_to_insured = (
                 request_data.patient_relationship_to_insured
             )
+        if request_data.number_of_trips is not None:
+            request.number_of_trips = request_data.number_of_trips
+        if request_data.authorization_start_date is not None:
+            request.authorization_start_date = (
+                request_data.authorization_start_date
+            )
+        if request_data.procedure_code is not None:
+            request.procedure_code = request_data.procedure_code
 
         # Check if request can be submitted (uses request state we just set)
         completion_status = await self.get_completion_status(request=request)
@@ -881,6 +899,9 @@ class AmbulanceRequestService(BaseService):
                 novitas_status=request.novitas_status,
                 novitas_submitted_at=request.novitas_submitted_at,
                 call_sheet_data=request.call_sheet_data,
+                number_of_trips=request.number_of_trips,
+                authorization_start_date=request.authorization_start_date,
+                procedure_code=request.procedure_code,
                 created_at=request.created_at,
                 updated_at=request.updated_at,
                 status_history=status_history_schemas,
@@ -903,6 +924,9 @@ class AmbulanceRequestService(BaseService):
             novitas_status=request.novitas_status,
             novitas_submitted_at=request.novitas_submitted_at,
             call_sheet_data=request.call_sheet_data,
+            number_of_trips=request.number_of_trips,
+            authorization_start_date=request.authorization_start_date,
+            procedure_code=request.procedure_code,
             created_at=request.created_at,
             updated_at=request.updated_at,
             status_history=status_history_schemas,
@@ -1598,6 +1622,14 @@ Necessity document, or "NO" if it is not."""
             request.patient_relationship_to_insured = (
                 update_data.patient_relationship_to_insured
             )
+        if update_data.number_of_trips is not None:
+            request.number_of_trips = update_data.number_of_trips
+        if update_data.authorization_start_date is not None:
+            request.authorization_start_date = (
+                update_data.authorization_start_date
+            )
+        if update_data.procedure_code is not None:
+            request.procedure_code = update_data.procedure_code
         if update_data.denial_reason is not None:
             request.denial_reason = update_data.denial_reason
         if update_data.denial_notes is not None:
@@ -1695,6 +1727,9 @@ Necessity document, or "NO" if it is not."""
             novitas_status=request.novitas_status,
             novitas_submitted_at=request.novitas_submitted_at,
             call_sheet_data=request.call_sheet_data,
+            number_of_trips=request.number_of_trips,
+            authorization_start_date=request.authorization_start_date,
+            procedure_code=request.procedure_code,
             created_at=request.created_at,
             updated_at=request.updated_at,
             status_history=status_history_schemas,
@@ -1707,7 +1742,7 @@ Necessity document, or "NO" if it is not."""
         request_id: int,
         user: User,
     ) -> bytes:
-        """Generate CMS-10344 PDF for a request.
+        """Generate the Novitas Form 13614 cover sheet PDF for a request.
 
         Args:
             request_id: ID of the request to generate PDF for.
@@ -1756,12 +1791,19 @@ Necessity document, or "NO" if it is not."""
         )
 
         # Generate PDF
-        pdf_bytes = self._pdf_generator_service.generate_cms_10344_pdf(
-            request=request
+        organization = await self._organization_dao.get_by_user_id(
+            request.user_id
+        )
+        pdf_bytes = (
+            self._pdf_generator_service.generate_novitas_cover_sheet_pdf(
+                request=request,
+                organization=organization,
+                submitted_by=user,
+            )
         )
 
         logger.info(
-            'Generated CMS-10344 PDF for request %s (size: %d bytes)',
+            'Generated Novitas Form 13614 PDF for request %s (size: %d bytes)',
             request_id,
             len(pdf_bytes),
         )
@@ -1775,8 +1817,8 @@ Necessity document, or "NO" if it is not."""
     ) -> bytes:
         """Generate a Call Sheet PDF for a request.
 
-        Unlike the CMS-10344 PDF, the Call Sheet is an operational
-        dispatch document, not a regulatory submission, so it can be
+        Unlike the Novitas Form 13614 cover sheet, the Call Sheet is an
+        operational dispatch document, not a regulatory submission, so it can be
         generated as soon as the request exists - it does not require
         the same full completion-status validation.
 
@@ -1934,7 +1976,7 @@ Necessity document, or "NO" if it is not."""
     ) -> AmbulanceRequestResponseSchema:
         """Fax the Novitas prior-authorization package for a request.
 
-        Builds the Novitas PA package - the CMS-10344 authorization form
+        Builds the Novitas PA package - the Form 13614 cover sheet
         plus any uploaded supporting documents (medical records, PCS,
         etc.) - and faxes it to Novitas in a single transmission. This is
         the "AI submits Novitas PA" step of the review-and-approve
@@ -1994,13 +2036,20 @@ Necessity document, or "NO" if it is not."""
                 'Novitas fax number is not configured'
             )
 
-        cms_pdf_bytes = self._pdf_generator_service.generate_cms_10344_pdf(
-            request=request
+        organization = await self._organization_dao.get_by_user_id(
+            request.user_id
+        )
+        cover_sheet_pdf_bytes = (
+            self._pdf_generator_service.generate_novitas_cover_sheet_pdf(
+                request=request,
+                organization=organization,
+                submitted_by=user,
+            )
         )
         attachments: list[tuple[str, bytes, str]] = [
             (
-                f'CMS-10344_Request-{request_id}.pdf',
-                cms_pdf_bytes,
+                f'Form13614_Request-{request_id}.pdf',
+                cover_sheet_pdf_bytes,
                 'application/pdf',
             ),
         ]

@@ -168,3 +168,75 @@ class TestCallSheetService:
 
         with pytest.raises(FileNotFoundError):
             service.get_editable_field_names()
+
+    def test_generate_strips_embedded_javascript(
+        self, service: CallSheetService
+    ):
+        """Test that no reachable JavaScript survives generation.
+
+        The bundled template's Submit button runs a script with a
+        hardcoded mailto SUBMITURL that would email a filled-in copy of
+        the form - with real patient data - outside the app. Nothing
+        reachable from the catalog or any widget should execute script
+        content in the generated PDF.
+        """
+        pdf_bytes = service.generate_call_sheet_pdf(_make_request())
+
+        doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+        try:
+            for xref in range(1, doc.xref_length()):
+                try:
+                    obj = doc.xref_object(xref)
+                except Exception:  # noqa: S112
+                    continue
+                assert '/S /JavaScript' not in obj, (
+                    f'live JavaScript action survived at xref {xref}'
+                )
+
+            catalog = doc.xref_object(doc.pdf_catalog())
+            assert '/AA null' in catalog or '/AA' not in catalog
+        finally:
+            doc.close()
+
+    def test_generate_removes_submit_button(
+        self, service: CallSheetService
+    ):
+        """Test that the Submit Form button widget is removed."""
+        pdf_bytes = service.generate_call_sheet_pdf(_make_request())
+
+        doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+        try:
+            button_fields = [
+                widget.field_name
+                for page in doc
+                for widget in (page.widgets() or [])
+                if widget.field_type_string == 'Button'
+            ]
+            assert button_fields == []
+        finally:
+            doc.close()
+
+    def test_generate_stays_a_live_fillable_form(
+        self, service: CallSheetService
+    ):
+        """Test that stripping scripts doesn't flatten the form.
+
+        Removing the Submit button and embedded JavaScript is a
+        targeted fix for the exfiltration/auto-run risk, not a reason
+        to flatten the rest of the form - crews still need to fill in
+        the remaining ~115 fields by hand after generation.
+        """
+        pdf_bytes = service.generate_call_sheet_pdf(_make_request())
+
+        doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+        try:
+            assert doc.is_form_pdf
+            field_names = {
+                widget.field_name
+                for page in doc
+                for widget in (page.widgets() or [])
+            }
+            assert 'DRIVER' in field_names
+            assert 'Narrative 1' in field_names
+        finally:
+            doc.close()

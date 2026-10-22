@@ -181,6 +181,23 @@ class ExtractedTransportationData(BaseModel):
             ),
         )
     )
+    number_of_trips: int | None = Field(
+        default=None,
+        examples=[12],
+        description=(
+            'Number of trips authorized/requested, for repetitive '
+            'non-emergent transport orders (e.g. recurring dialysis '
+            'transport). Not to exceed 80 in 60 days per Novitas rules.'
+        ),
+    )
+    authorization_start_date: date | None = Field(
+        default=None,
+        examples=['2025-12-06'],
+        description=(
+            'Start date of the requested authorization period, for '
+            'repetitive non-emergent transport orders'
+        ),
+    )
     confidence_score: float | None = Field(
         default=None,
         description="AI's self-assessment of extraction accuracy (0 to 100)",
