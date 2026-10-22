@@ -458,7 +458,7 @@ class TestAmbulanceRequestService:
 
         with pytest.raises(AmbulanceRequestInvalidFileIdsException):
             await service.create_request(
-                user_id=attacker.id, request_data=request_data
+                user=attacker, request_data=request_data
             )
 
         # The victim's file must stay unlinked, not stolen.
@@ -1169,6 +1169,7 @@ class TestGetCompletionStatus:
         file_dao = RequestFileDAO(db_session)
         await file_dao.create(
             request_id=request.id,
+            uploaded_by_user_id=user.id,
             filename='supporting-doc.pdf',
             s3_key='users/1/supporting-doc.pdf',
             file_size=1024,
@@ -1204,6 +1205,7 @@ class TestGetCompletionStatus:
         file_dao = RequestFileDAO(db_session)
         request_file = await file_dao.create(
             request_id=request.id,
+            uploaded_by_user_id=user.id,
             filename='verification.pdf',
             s3_key='users/1/verification.pdf',
             file_size=1024,
@@ -1806,6 +1808,20 @@ class TestCreateDraftRequestFromFax:
 
         service = self._make_service(db_session, mock_ai_service_success)
         draft = await service.create_draft_request_from_fax(fax.id)
+        await db_session.commit()
+
+        # A supporting document, so the Verification of Medical
+        # Necessity gate is satisfied by the CMS-13614 form_number
+        # below without needing an AI content check.
+        file_dao = RequestFileDAO(db_session)
+        await file_dao.create(
+            request_id=draft.id,
+            uploaded_by_user_id=reviewing_admin.id,
+            filename='supporting-doc.pdf',
+            s3_key='users/1/supporting-doc.pdf',
+            file_size=1024,
+            content_type='application/pdf',
+        )
         await db_session.commit()
 
         request_data = CreateAmbulanceRequestSchema(
