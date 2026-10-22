@@ -1508,6 +1508,14 @@ class TestCreateDraftRequestFromFax:
         yield
         settings.ringcentral_settings.FAX_INTAKE_ADMIN_EMAIL = original
 
+    @pytest.fixture(autouse=True)
+    def _reset_novitas_fax_number(self):
+        """Reset the Novitas fax number setting after each test."""
+        settings = Settings.load()
+        original = settings.ringcentral_settings.NOVITAS_FAX_NUMBER
+        yield
+        settings.ringcentral_settings.NOVITAS_FAX_NUMBER = original
+
     @pytest.fixture
     def mock_ai_service_success(self) -> MagicMock:
         """Create a mock AIExtractionService reporting a successful
@@ -1872,6 +1880,98 @@ class TestCreateDraftRequestFromFax:
             await service.create_request(
                 user=unrelated_provider, request_data=request_data
             )
+
+    @pytest.mark.asyncio
+    async def test_fax_from_novitas_is_not_auto_drafted(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_success,
+    ):
+        """Test that a fax from Novitas's own number isn't treated as
+        a new patient referral.
+
+        It's Novitas's response to an existing submission (approval,
+        denial, UTN, or request for more info), not a new patient -
+        extracting "patient info" from a determination letter would
+        create a bogus draft. It's held UNRESOLVED for an admin to
+        manually match to the right request instead.
+        """  # noqa: D205
+        await user_factory(email='admin@example.com', role=UserRole.ADMIN)
+        Settings.load().ringcentral_settings.NOVITAS_FAX_NUMBER = (
+            '+15559990000'
+        )
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-novitas-response-1',
+            s3_key='faxes/inbound/rc-novitas-response-1.pdf',
+            from_number='+15559990000',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(fax.id)
+
+        assert draft is None
+        mock_ai_service_success.extract_data_from_files.assert_not_called()
+        await db_session.refresh(fax)
+        assert fax.status == FaxStatus.UNRESOLVED
+        assert fax.request_id is None
+
+    @pytest.mark.asyncio
+    async def test_fax_from_novitas_matches_despite_formatting_differences(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_success,
+    ):
+        """Test that the Novitas-number check tolerates formatting
+        differences between the configured number and the reported one.
+        """  # noqa: D205
+        await user_factory(email='admin@example.com', role=UserRole.ADMIN)
+        Settings.load().ringcentral_settings.NOVITAS_FAX_NUMBER = (
+            '(555) 999-0000'
+        )
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-novitas-response-2',
+            s3_key='faxes/inbound/rc-novitas-response-2.pdf',
+            from_number='15559990000',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(fax.id)
+
+        assert draft is None
+        await db_session.refresh(fax)
+        assert fax.status == FaxStatus.UNRESOLVED
+
+    @pytest.mark.asyncio
+    async def test_fax_from_other_number_still_auto_drafts(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_success,
+    ):
+        """Test that the Novitas check doesn't block ordinary referrals."""
+        await user_factory(email='admin@example.com', role=UserRole.ADMIN)
+        Settings.load().ringcentral_settings.NOVITAS_FAX_NUMBER = (
+            '+15559990000'
+        )
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-referral-1',
+            s3_key='faxes/inbound/rc-referral-1.pdf',
+            from_number='+15551112222',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(fax.id)
+
+        assert draft is not None
+        assert draft.status == RequestStatus.DRAFT
 
 
 class TestGenerateCms1500Pdf:

@@ -88,6 +88,31 @@ PLACEHOLDER_PATIENT_NAME = 'Unknown'
 PLACEHOLDER_PATIENT_ID = 'TBD'
 DEFAULT_ADMIN_LIMIT = 1000
 PRESIGNED_URL_EXPIRATION = 3600  # 1 hour in seconds
+US_PHONE_NUMBER_DIGIT_COUNT = 11  # Country code + area code + number
+
+
+def _normalize_fax_number(number: str | None) -> str:
+    """Normalize a fax number for comparison, digits only.
+
+    Provider-reported numbers and configured settings can differ in
+    formatting (a leading '+', a leading '1', dashes) without being
+    different numbers, so comparisons use this rather than exact
+    string equality.
+
+    Args:
+        number: Raw fax number, or None.
+
+    Returns:
+        str: Digits-only form, with a leading country code '1'
+            stripped if present (empty string if number is falsy).
+
+    """
+    if not number:
+        return ''
+    digits = ''.join(char for char in number if char.isdigit())
+    if len(digits) == US_PHONE_NUMBER_DIGIT_COUNT and digits.startswith('1'):
+        digits = digits[1:]
+    return digits
 
 
 class AmbulanceRequestService(BaseService):
@@ -503,6 +528,17 @@ class AmbulanceRequestService(BaseService):
         files, then create_request_with_extraction" flow, triggered by
         the fax webhook instead of a human upload.
 
+        A fax from Novitas's own fax number is never run through this
+        - it's Novitas's response to a request already submitted
+        (an approval, denial, UTN notice, or request for more info),
+        not a new patient referral, and extracting "patient info" from
+        a determination letter would create a bogus draft. Novitas
+        exposes no API to parse its content, so (as with
+        NovitasStatus generally) matching it to the right existing
+        request and recording the outcome is left for an admin to do
+        by hand; this only ensures the fax is held for that instead of
+        being misprocessed as a new referral.
+
         Only processes faxes still at RECEIVED, so this is safe to call
         more than once for the same fax_id (e.g. a retried Celery task
         delivery): a fax already moved past RECEIVED by an earlier call
@@ -513,9 +549,10 @@ class AmbulanceRequestService(BaseService):
 
         Returns:
             AmbulanceRequest | None: The created draft, or None if the
-                fax was not eligible for processing, no admin user
-                exists to own the draft, or extraction did not succeed
-                (in which case the fax is marked UNRESOLVED for manual
+                fax was not eligible for processing, is a Novitas
+                response awaiting manual linking, no admin user exists
+                to own the draft, or extraction did not succeed (in
+                each case the fax is marked UNRESOLVED for manual
                 review).
 
         """
@@ -526,6 +563,23 @@ class AmbulanceRequestService(BaseService):
                 fax_id,
                 fax.status if fax else 'not found',
             )
+            return None
+
+        novitas_fax_number = settings.ringcentral_settings.NOVITAS_FAX_NUMBER
+        if novitas_fax_number and _normalize_fax_number(
+            fax.from_number
+        ) == _normalize_fax_number(novitas_fax_number):
+            logger.info(
+                'Fax %s is from Novitas (%s) - likely a response to an '
+                'existing submission, not a new referral. Holding for '
+                'manual review/linking rather than auto-drafting',
+                fax_id,
+                fax.from_number,
+            )
+            await self._incoming_fax_dao.update_status(
+                fax_id=fax_id, status=FaxStatus.UNRESOLVED
+            )
+            await self._session.commit()
             return None
 
         # Checkpoint the PROCESSING transition immediately so the fax
