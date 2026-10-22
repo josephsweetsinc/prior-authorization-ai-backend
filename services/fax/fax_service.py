@@ -5,6 +5,7 @@ import logging
 from functools import lru_cache
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.service import BaseService
@@ -120,6 +121,59 @@ class FaxService(BaseService):
                 results.append(fax)
         return results
 
+    async def _create_fax_idempotently(
+        self,
+        *,
+        provider_message_id: str,
+        **create_kwargs: Any,
+    ) -> tuple[IncomingFax, bool]:
+        """Create a fax record, tolerating a concurrent duplicate insert.
+
+        process_inbound_message already checks for an existing record
+        by provider_message_id before calling this, but that check and
+        this insert aren't atomic - a genuinely concurrent redelivery
+        of the same webhook event (RingCentral retries on a slow ack)
+        can pass both checks before either commits. The column's unique
+        constraint then rejects the second insert; rather than letting
+        that surface as an unhandled error (which also silently drops
+        the webhook delivery one level up), fall back to returning the
+        row the other call already created - the same idempotent
+        no-op as the early-return path above.
+
+        Args:
+            provider_message_id: Fax provider's message ID.
+            **create_kwargs: Remaining IncomingFaxDAO.create() kwargs.
+
+        Returns:
+            tuple[IncomingFax, bool]: The fax record, and whether this
+                call actually created it (False means a concurrent
+                call won the race and this is its record - the caller
+                should treat that exactly like the pre-existing-record
+                case and not re-trigger downstream processing).
+
+        """
+        try:
+            fax = await self._fax_dao.create(
+                provider_message_id=provider_message_id, **create_kwargs
+            )
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            existing = await self._fax_dao.get_by_provider_message_id(
+                provider_message_id
+            )
+            if existing is None:
+                raise
+            logger.info(
+                'Fax message %s was created by a concurrent request '
+                '(fax id=%s); using that record instead of inserting '
+                'a duplicate',
+                provider_message_id,
+                existing.id,
+            )
+            return existing, False
+        return fax, True
+
     async def process_inbound_message(
         self,
         message_id: str,
@@ -163,7 +217,7 @@ class FaxService(BaseService):
             logger.warning(
                 'Fax message %s has no document attachment', message_id
             )
-            fax = await self._fax_dao.create(
+            fax, _ = await self._create_fax_idempotently(
                 provider_message_id=message_id,
                 direction=FaxDirection.INBOUND,
                 status=FaxStatus.FAILED,
@@ -171,7 +225,6 @@ class FaxService(BaseService):
                 to_number=to_number,
                 page_count=page_count,
             )
-            await self._session.commit()
             return fax
 
         content, content_type = (
@@ -193,7 +246,7 @@ class FaxService(BaseService):
             metadata={'ringcentral_message_id': message_id},
         )
 
-        fax = await self._fax_dao.create(
+        fax, created = await self._create_fax_idempotently(
             provider_message_id=message_id,
             direction=FaxDirection.INBOUND,
             status=FaxStatus.RECEIVED,
@@ -204,7 +257,11 @@ class FaxService(BaseService):
             content_type=content_type,
             file_size=len(content),
         )
-        await self._session.commit()
+        if not created:
+            # A concurrent request already created and is processing
+            # this fax - treat it exactly like the early-return above.
+            return fax
+
         logger.info(
             'Stored inbound fax %s (message_id=%s) from %s',
             fax.id,

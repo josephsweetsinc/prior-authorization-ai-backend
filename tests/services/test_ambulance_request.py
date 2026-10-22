@@ -2401,3 +2401,50 @@ class TestSubmitToNovitas:
             b'%PDF-pcs',
             'application/pdf',
         )
+
+    @pytest.mark.asyncio
+    async def test_unreadable_supporting_document_aborts_submission(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a document download failure aborts the submission.
+
+        Silently dropping an unreadable attachment and faxing what's
+        left would mark the request SUBMITTED even though Novitas
+        never received one of its supporting documents - a partial PA
+        package that looks successful in PAAI but isn't complete.
+        """
+        admin = await user_factory(
+            email='novitas-baddoc-admin@example.com', role=UserRole.ADMIN
+        )
+        owner = await user_factory(email='novitas-baddoc-owner@example.com')
+        request = await ambulance_request_factory(
+            user_id=owner.id, status=RequestStatus.APPROVED
+        )
+        await db_session.commit()
+        self._mock_can_submit(service)
+        Settings.load().ringcentral_settings.NOVITAS_FAX_NUMBER = (
+            '+15559990000'
+        )
+        service._pdf_generator_service = MagicMock()
+        service._pdf_generator_service.generate_cms_10344_pdf.return_value = (
+            b'%PDF-cms'
+        )
+        fake_file = MagicMock(id=1, filename='pcs.pdf', s3_key='key/pcs.pdf')
+        service._file_dao.get_by_request_id = AsyncMock(
+            return_value=[fake_file]
+        )
+        service._s3_actions.download_from_s3 = MagicMock(
+            side_effect=Exception('S3 unavailable')
+        )
+        service._fax_service.send_outbound_fax = AsyncMock()
+
+        with pytest.raises(AmbulanceRequestPDFGenerationException):
+            await service.submit_to_novitas(request_id=request.id, user=admin)
+
+        service._fax_service.send_outbound_fax.assert_not_called()
+        await db_session.refresh(request)
+        assert request.novitas_status == NovitasStatus.NOT_SUBMITTED

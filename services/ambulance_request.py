@@ -2097,14 +2097,24 @@ Necessity document, or "NO" if it is not."""
                 content, content_type = self._s3_actions.download_from_s3(
                     file.s3_key
                 )
-            except Exception:
+            except Exception as exc:
+                # Abort rather than send a partial package: silently
+                # dropping this attachment and faxing what's left would
+                # mark the request SUBMITTED even though Novitas never
+                # received one of its supporting documents.
                 logger.exception(
                     'Failed to download supporting document %s for '
-                    'Novitas submission (request %s)',
+                    'Novitas submission (request %s); aborting submission '
+                    'rather than sending an incomplete package',
                     file.id,
                     request_id,
                 )
-                continue
+                raise AmbulanceRequestPDFGenerationException(  # noqa: TRY003
+                    f'Failed to retrieve supporting document '
+                    f'"{file.filename}" for submission. Submission '
+                    f'aborted rather than sending an incomplete package '
+                    f'to Novitas.'
+                ) from exc
             attachments.append((file.filename, content, content_type))
 
         fax = await self._fax_service.send_outbound_fax(
