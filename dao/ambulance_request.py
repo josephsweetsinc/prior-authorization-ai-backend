@@ -637,6 +637,38 @@ class RequestFileDAO(BaseDAO):
         await self._session.flush()
         return result.scalar_one_or_none()
 
+    async def set_verification_check_result(
+        self,
+        file_id: int,
+        *,
+        is_verification_of_medical_necessity: bool,
+    ) -> RequestFile | None:
+        """Cache the AI content-check result for a file.
+
+        Args:
+            file_id: File ID.
+            is_verification_of_medical_necessity: Whether this file was
+                found to be a Verification of Medical Necessity
+                document.
+
+        Returns:
+            RequestFile | None: Updated file instance or None if not found.
+
+        """
+        stmt = (
+            update(RequestFile)
+            .where(RequestFile.id == file_id)
+            .values(
+                is_verification_of_medical_necessity=(
+                    is_verification_of_medical_necessity
+                )
+            )
+            .returning(RequestFile)
+        )
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        return result.scalar_one_or_none()
+
     async def delete_by_id(self, file_id: int) -> RequestFile | None:
         """Delete file by id.
 
