@@ -119,14 +119,17 @@ async def create_request_with_extraction(
 
 @ambulance_request_router.post(
     '/create',
-    description='Create ambulance request with info verified by provider.',
+    description=(
+        'Create ambulance request with info verified by provider, or '
+        'by an admin for a fax-originated draft.'
+    ),
     summary='Create ambulance request.',
     response_model=AmbulanceRequestResponseSchema,
 )
 @exception_handler
 async def create_request(
     request_data: CreateAmbulanceRequestSchema,
-    user: Annotated[User, Security(get_provider_user_from_token)],
+    user: Annotated[User, Security(get_current_user)],
     service: Annotated[
         AmbulanceRequestService, Depends(get_service(AmbulanceRequestService))
     ],
@@ -134,7 +137,10 @@ async def create_request(
     """Update draft request and submit it.
 
     This endpoint updates an existing draft request with verified data
-    and changes its status to SUBMITTED.
+    and changes its status to SUBMITTED. Open to the provider who owns
+    the draft, or any admin - a fax-originated draft is owned by the
+    system's resolved fax-intake admin account, so an admin override
+    is required for anyone to ever submit it.
 
     Args:
         request_data: Request data with request_id and verified information.
@@ -148,9 +154,7 @@ async def create_request(
         HTTPException: If request update fails.
 
     """
-    return await service.create_request(
-        user_id=user.id, request_data=request_data
-    )
+    return await service.create_request(user=user, request_data=request_data)
 
 
 @ambulance_request_router.get(

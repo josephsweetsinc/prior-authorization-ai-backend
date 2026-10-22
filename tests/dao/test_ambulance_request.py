@@ -639,11 +639,16 @@ class TestRequestFileDAO:
     async def test_create(
         self,
         db_session,
+        user_factory,
     ):
         """Test creating a file record."""
+        user = await user_factory()
+        await db_session.commit()
+
         dao = RequestFileDAO(db_session)
         file = await dao.create(
             request_id=None,
+            uploaded_by_user_id=user.id,
             filename='test.pdf',
             s3_key='users/1/ambulance-requests/test.pdf',
             file_size=1024,
@@ -653,6 +658,7 @@ class TestRequestFileDAO:
 
         assert file.id is not None
         assert file.request_id is None
+        assert file.uploaded_by_user_id == user.id
         assert file.filename == 'test.pdf'
         assert file.s3_key == 'users/1/ambulance-requests/test.pdf'
         assert file.file_size == 1024
@@ -662,11 +668,16 @@ class TestRequestFileDAO:
     async def test_get_by_id(
         self,
         db_session,
+        user_factory,
     ):
         """Test getting file by ID."""
+        user = await user_factory()
+        await db_session.commit()
+
         dao = RequestFileDAO(db_session)
         created = await dao.create(
             request_id=None,
+            uploaded_by_user_id=user.id,
             filename='test.pdf',
             s3_key='users/1/test.pdf',
             file_size=1024,
@@ -708,6 +719,7 @@ class TestRequestFileDAO:
         file_dao = RequestFileDAO(db_session)
         file1 = await file_dao.create(
             request_id=request.id,
+            uploaded_by_user_id=user.id,
             filename='file1.pdf',
             s3_key='users/1/file1.pdf',
             file_size=1024,
@@ -715,6 +727,7 @@ class TestRequestFileDAO:
         )
         file2 = await file_dao.create(
             request_id=request.id,
+            uploaded_by_user_id=user.id,
             filename='file2.pdf',
             s3_key='users/1/file2.pdf',
             file_size=2048,
@@ -723,6 +736,7 @@ class TestRequestFileDAO:
         # File without request_id
         await file_dao.create(
             request_id=None,
+            uploaded_by_user_id=user.id,
             filename='file3.pdf',
             s3_key='users/1/file3.pdf',
             file_size=3072,
@@ -764,6 +778,7 @@ class TestRequestFileDAO:
         file_dao = RequestFileDAO(db_session)
         file = await file_dao.create(
             request_id=None,
+            uploaded_by_user_id=user.id,
             filename='test.pdf',
             s3_key='users/1/test.pdf',
             file_size=1024,
@@ -774,6 +789,7 @@ class TestRequestFileDAO:
         updated = await file_dao.update_request_id(
             file_id=file.id,
             request_id=request.id,
+            uploaded_by_user_id=user.id,
         )
         await db_session.commit()
 
@@ -796,5 +812,164 @@ class TestRequestFileDAO:
         updated = await file_dao.update_request_id(
             file_id=99999,
             request_id=1,
+            uploaded_by_user_id=1,
         )
         assert updated is None
+
+    @pytest.mark.asyncio
+    async def test_update_request_id_rejects_file_not_owned_by_caller(
+        self,
+        db_session,
+        user_factory,
+    ):
+        """Test that linking a file requires the caller to own it.
+
+        Without this check, any authenticated user could reassign an
+        arbitrary file_id - including one belonging to another user -
+        onto their own request.
+        """
+        owner = await user_factory(email='owner@example.com')
+        attacker = await user_factory(email='attacker@example.com')
+        await db_session.commit()
+
+        request_dao = AmbulanceRequestDAO(db_session)
+        attacker_request = await request_dao.create(
+            user_id=attacker.id,
+            transportation_type=TransportationType.AMBULANCE,
+            patient_first_name='John',
+            patient_last_name='Doe',
+            patient_date_of_birth=date(1980, 1, 1),
+            patient_id='DA123456789HY',
+            date_of_transport=date(2025, 12, 6),
+            time_of_transport=time(13, 40),
+            pickup_address='123 Main St',
+            destination_address='456 Medical Dr',
+        )
+        await db_session.commit()
+
+        file_dao = RequestFileDAO(db_session)
+        victim_file = await file_dao.create(
+            request_id=None,
+            uploaded_by_user_id=owner.id,
+            filename='victim.pdf',
+            s3_key='users/owner/victim.pdf',
+            file_size=1024,
+            content_type='application/pdf',
+        )
+        await db_session.commit()
+
+        updated = await file_dao.update_request_id(
+            file_id=victim_file.id,
+            request_id=attacker_request.id,
+            uploaded_by_user_id=attacker.id,
+        )
+
+        assert updated is None
+        found = await file_dao.get_by_id(victim_file.id)
+        assert found is not None
+        assert found.request_id is None
+
+    @pytest.mark.asyncio
+    async def test_update_request_id_rejects_already_linked_file(
+        self,
+        db_session,
+        user_factory,
+    ):
+        """Test that a file already linked to a request can't be relinked.
+
+        Guards against reassigning a file away from the request it's
+        already attached to, even for its original uploader.
+        """
+        user = await user_factory()
+        await db_session.commit()
+
+        request_dao = AmbulanceRequestDAO(db_session)
+        first_request = await request_dao.create(
+            user_id=user.id,
+            transportation_type=TransportationType.AMBULANCE,
+            patient_first_name='John',
+            patient_last_name='Doe',
+            patient_date_of_birth=date(1980, 1, 1),
+            patient_id='DA123456789HY',
+            date_of_transport=date(2025, 12, 6),
+            time_of_transport=time(13, 40),
+            pickup_address='123 Main St',
+            destination_address='456 Medical Dr',
+        )
+        second_request = await request_dao.create(
+            user_id=user.id,
+            transportation_type=TransportationType.AMBULANCE,
+            patient_first_name='Jane',
+            patient_last_name='Roe',
+            patient_date_of_birth=date(1981, 2, 2),
+            patient_id='DA987654321HY',
+            date_of_transport=date(2025, 12, 7),
+            time_of_transport=time(9, 0),
+            pickup_address='789 Oak St',
+            destination_address='321 Clinic Ave',
+        )
+        await db_session.commit()
+
+        file_dao = RequestFileDAO(db_session)
+        file = await file_dao.create(
+            request_id=first_request.id,
+            uploaded_by_user_id=user.id,
+            filename='test.pdf',
+            s3_key='users/1/test.pdf',
+            file_size=1024,
+            content_type='application/pdf',
+        )
+        await db_session.commit()
+
+        updated = await file_dao.update_request_id(
+            file_id=file.id,
+            request_id=second_request.id,
+            uploaded_by_user_id=user.id,
+        )
+
+        assert updated is None
+        found = await file_dao.get_by_id(file.id)
+        assert found is not None
+        assert found.request_id == first_request.id
+
+    @pytest.mark.asyncio
+    async def test_get_by_ids_excludes_files_not_owned_by_caller(
+        self,
+        db_session,
+        user_factory,
+    ):
+        """Test that get_by_ids never returns another user's file.
+
+        Without this scoping, one user's file_id could be read by
+        another user, e.g. to have its content AI-extracted into their
+        own draft request.
+        """
+        owner = await user_factory(email='owner2@example.com')
+        other_user = await user_factory(email='other-user@example.com')
+        await db_session.commit()
+
+        file_dao = RequestFileDAO(db_session)
+        owned_file = await file_dao.create(
+            request_id=None,
+            uploaded_by_user_id=owner.id,
+            filename='mine.pdf',
+            s3_key='users/owner/mine.pdf',
+            file_size=1024,
+            content_type='application/pdf',
+        )
+        others_file = await file_dao.create(
+            request_id=None,
+            uploaded_by_user_id=other_user.id,
+            filename='theirs.pdf',
+            s3_key='users/other/theirs.pdf',
+            file_size=1024,
+            content_type='application/pdf',
+        )
+        await db_session.commit()
+
+        results = await file_dao.get_by_ids(
+            [owned_file.id, others_file.id],
+            uploaded_by_user_id=owner.id,
+        )
+
+        assert {f.id for f in results} == {owned_file.id}

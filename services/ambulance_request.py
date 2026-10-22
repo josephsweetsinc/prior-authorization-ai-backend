@@ -79,8 +79,41 @@ MIN_NAME_LENGTH = 3
 MIN_ADDRESS_LENGTH = 5
 EMPTY_FILE_SIZE = 0
 MIN_TOTAL_COUNT = 0
+
+# Placeholder defaults _build_draft_request_kwargs fills in for fields
+# the AI couldn't extract, so a draft can be created for review rather
+# than blocking on missing data. get_completion_status treats these as
+# not actually filled in, the same way it already treats 'Pending'
+# addresses, so a request can't be submitted on placeholder data.
+PLACEHOLDER_PATIENT_NAME = 'Unknown'
+PLACEHOLDER_PATIENT_ID = 'TBD'
 DEFAULT_ADMIN_LIMIT = 1000
 PRESIGNED_URL_EXPIRATION = 3600  # 1 hour in seconds
+US_PHONE_NUMBER_DIGIT_COUNT = 11  # Country code + area code + number
+
+
+def _normalize_fax_number(number: str | None) -> str:
+    """Normalize a fax number for comparison, digits only.
+
+    Provider-reported numbers and configured settings can differ in
+    formatting (a leading '+', a leading '1', dashes) without being
+    different numbers, so comparisons use this rather than exact
+    string equality.
+
+    Args:
+        number: Raw fax number, or None.
+
+    Returns:
+        str: Digits-only form, with a leading country code '1'
+            stripped if present (empty string if number is falsy).
+
+    """
+    if not number:
+        return ''
+    digits = ''.join(char for char in number if char.isdigit())
+    if len(digits) == US_PHONE_NUMBER_DIGIT_COUNT and digits.startswith('1'):
+        digits = digits[1:]
+    return digits
 
 
 class AmbulanceRequestService(BaseService):
@@ -231,6 +264,7 @@ class AmbulanceRequestService(BaseService):
         request_file = await self._file_dao.create(
             request_id=None,
             # Temporary, will be updated when request is created
+            uploaded_by_user_id=user_id,
             filename=file.filename or 'unknown',
             s3_key=s3_key,
             file_size=file_size,
@@ -399,7 +433,8 @@ class AmbulanceRequestService(BaseService):
 
         """
         file_records: list[RequestFile] = await self._file_dao.get_by_ids(
-            request_data.file_ids
+            request_data.file_ids,
+            uploaded_by_user_id=user_id,
         )
         # Matches file_records by id for better perf
         file_records_by_id = {
@@ -445,6 +480,7 @@ class AmbulanceRequestService(BaseService):
             await self._file_dao.update_request_id(
                 file_id=file_id,
                 request_id=draft_request.id,
+                uploaded_by_user_id=user_id,
             )
         await self._session.commit()
         await self._session.refresh(draft_request)
@@ -502,6 +538,17 @@ class AmbulanceRequestService(BaseService):
         files, then create_request_with_extraction" flow, triggered by
         the fax webhook instead of a human upload.
 
+        A fax from Novitas's own fax number is never run through this
+        - it's Novitas's response to a request already submitted
+        (an approval, denial, UTN notice, or request for more info),
+        not a new patient referral, and extracting "patient info" from
+        a determination letter would create a bogus draft. Novitas
+        exposes no API to parse its content, so (as with
+        NovitasStatus generally) matching it to the right existing
+        request and recording the outcome is left for an admin to do
+        by hand; this only ensures the fax is held for that instead of
+        being misprocessed as a new referral.
+
         Only processes faxes still at RECEIVED, so this is safe to call
         more than once for the same fax_id (e.g. a retried Celery task
         delivery): a fax already moved past RECEIVED by an earlier call
@@ -512,9 +559,10 @@ class AmbulanceRequestService(BaseService):
 
         Returns:
             AmbulanceRequest | None: The created draft, or None if the
-                fax was not eligible for processing, no admin user
-                exists to own the draft, or extraction did not succeed
-                (in which case the fax is marked UNRESOLVED for manual
+                fax was not eligible for processing, is a Novitas
+                response awaiting manual linking, no admin user exists
+                to own the draft, or extraction did not succeed (in
+                each case the fax is marked UNRESOLVED for manual
                 review).
 
         """
@@ -525,6 +573,23 @@ class AmbulanceRequestService(BaseService):
                 fax_id,
                 fax.status if fax else 'not found',
             )
+            return None
+
+        novitas_fax_number = settings.ringcentral_settings.NOVITAS_FAX_NUMBER
+        if novitas_fax_number and _normalize_fax_number(
+            fax.from_number
+        ) == _normalize_fax_number(novitas_fax_number):
+            logger.info(
+                'Fax %s is from Novitas (%s) - likely a response to an '
+                'existing submission, not a new referral. Holding for '
+                'manual review/linking rather than auto-drafting',
+                fax_id,
+                fax.from_number,
+            )
+            await self._incoming_fax_dao.update_status(
+                fax_id=fax_id, status=FaxStatus.UNRESOLVED
+            )
+            await self._session.commit()
             return None
 
         # Checkpoint the PROCESSING transition immediately so the fax
@@ -587,26 +652,35 @@ class AmbulanceRequestService(BaseService):
 
     async def create_request(  # noqa: C901,PLR0912, PLR0915
         self,
-        user_id: int,
+        user: User,
         request_data: CreateAmbulanceRequestSchema,
     ) -> AmbulanceRequestResponseSchema:
         """Update draft request and submit it.
 
+        A draft can be submitted by the provider who owns it, or by any
+        admin - the latter is required for a fax-originated draft,
+        which is owned by the system's resolved fax-intake admin
+        account (see create_draft_request_from_fax) rather than by any
+        provider, so without an admin override no one could ever
+        submit it.
+
         Args:
-            user_id: ID of the user creating the request.
+            user: The user submitting the request - either the
+                provider who owns the draft, or any admin.
             request_data: Request data with request_id of draft to update.
 
         Returns:
             AmbulanceRequestResponseSchema: Updated and submitted request.
 
         """
+        user_id = user.id
         # Get existing draft request
         request = await self._request_dao.get_by_id(
             request_id=request_data.request_id,
         )
         if not request:
             raise AmbulanceRequestNotFoundException
-        if request.user_id != user_id:
+        if request.user_id != user_id and user.role != UserRole.ADMIN:
             raise AmbulanceRequestPermissionException
         if request.status != RequestStatus.DRAFT:
             raise AmbulanceRequestInvalidStatusException(  # noqa: TRY003
@@ -684,16 +758,35 @@ class AmbulanceRequestService(BaseService):
         request.status = RequestStatus.SUBMITTED
         await self._session.flush()
 
-        # Link any additional files provided in request_data
+        # Link any additional files provided in request_data. Scoped to
+        # files uploaded_by_user_id == user_id and not already linked -
+        # otherwise any authenticated user could reassign an arbitrary
+        # file_id, including one already attached to another user's
+        # request, onto their own.
         if request_data.file_ids:
+            owned_files = await self._file_dao.get_by_ids(
+                request_data.file_ids,
+                uploaded_by_user_id=user_id,
+            )
+            unlinked_owned_file_ids = {
+                file_record.id
+                for file_record in owned_files
+                if file_record.request_id is None
+            }
+            invalid_file_ids = [
+                file_id
+                for file_id in request_data.file_ids
+                if file_id not in unlinked_owned_file_ids
+            ]
+            if invalid_file_ids:
+                raise AmbulanceRequestInvalidFileIdsException(
+                    invalid_file_ids=invalid_file_ids
+                )
             for file_id in request_data.file_ids:
-                # Check if file exists and belongs to user happens in file_dao usually, but checking here
-                # We trust file_ids are valid for the user or we should validate them.
-                # Ideally we should validate them, but for now we just link them.
-                # Assuming valid IDs from frontend.
                 await self._file_dao.update_request_id(
                     file_id=file_id,
                     request_id=request.id,
+                    uploaded_by_user_id=user_id,
                 )
 
         await self._status_history_dao.create(
@@ -1092,7 +1185,10 @@ class AmbulanceRequestService(BaseService):
 
         # Check required fields
         # Basic patient information
-        if not request.patient_first_name:
+        if (
+            not request.patient_first_name
+            or request.patient_first_name == PLACEHOLDER_PATIENT_NAME
+        ):
             required_fields.append(
                 CompletionStatusItem(
                     name='Patient First Name',
@@ -1116,7 +1212,10 @@ class AmbulanceRequestService(BaseService):
                 )
             )
 
-        if not request.patient_last_name:
+        if (
+            not request.patient_last_name
+            or request.patient_last_name == PLACEHOLDER_PATIENT_NAME
+        ):
             required_fields.append(
                 CompletionStatusItem(
                     name='Patient Last Name',
@@ -1140,7 +1239,10 @@ class AmbulanceRequestService(BaseService):
                 )
             )
 
-        if not request.patient_id:
+        if (
+            not request.patient_id
+            or request.patient_id == PLACEHOLDER_PATIENT_ID
+        ):
             required_fields.append(
                 CompletionStatusItem(
                     name='Patient ID',
@@ -1213,14 +1315,29 @@ class AmbulanceRequestService(BaseService):
         # Check required documents
         files = await self._file_dao.get_by_request_id(request_id=request.id)
 
-        # Check for Verification of Medical Necessity document by content
-        # Check for Verification of Medical Necessity document by content
-        # Note: We are no longer checking for this as a mandatory requirement
-        # to save on LLM costs and reduce friction
-        # has_verification = await self._check_verification_document_by_content(
-        #     files=files,
-        #     form_number=request.form_number,
-        # )
+        has_verification = await self._check_verification_document_by_content(
+            files=files,
+            form_number=request.form_number,
+        )
+        required_documents.append(
+            CompletionStatusItem(
+                name='Verification of Medical Necessity',
+                status=(
+                    CompletionStatus.COMPLETE
+                    if has_verification
+                    else CompletionStatus.MISSING
+                ),
+                message=(
+                    None
+                    if has_verification
+                    else (
+                        'A Verification of Medical Necessity document '
+                        '(e.g. CMS-13614) must be uploaded before this '
+                        'request can be submitted'
+                    )
+                ),
+            )
+        )
 
         # Filter only missing/incomplete items
         missing_fields = [
@@ -1268,7 +1385,7 @@ class AmbulanceRequestService(BaseService):
             can_submit=can_submit,
         )
 
-    async def _check_verification_document_by_content(
+    async def _check_verification_document_by_content(  # noqa: C901, PLR0912
         self,
         files: list[RequestFile],
         form_number: str | None,
@@ -1277,7 +1394,11 @@ class AmbulanceRequestService(BaseService):
 
         This method analyzes document content using AI to determine if any
         of the uploaded files contains Verification of Medical Necessity
-        information.
+        information. Per-file AI results are cached on the file row
+        (RequestFile.is_verification_of_medical_necessity) - this check
+        runs on every completion-status evaluation (e.g. every save and
+        every submit attempt), so without caching it would re-run a
+        vision-model call per file on every single call.
 
         Args:
             files: List of request files to check.
@@ -1305,7 +1426,7 @@ class AmbulanceRequestService(BaseService):
                 )
                 return True
 
-        # Check document content using AI for each file
+        # Check document content using AI for each file not yet checked
         verification_prompt = """You are a medical document analyst.
 Analyze the provided document and determine if it is a "Verification of
 Medical Necessity" form or document.
@@ -1322,6 +1443,16 @@ Respond with ONLY one word: "YES" if this is a Verification of Medical
 Necessity document, or "NO" if it is not."""
 
         for file in files:
+            if file.is_verification_of_medical_necessity is not None:
+                if file.is_verification_of_medical_necessity:
+                    logger.info(
+                        'Using cached Verification of Medical Necessity '
+                        'result for file: %s',
+                        file.filename,
+                    )
+                    return True
+                continue
+
             try:
                 # Download file from S3
                 (
@@ -1371,7 +1502,13 @@ Necessity document, or "NO" if it is not."""
                     response_text,
                 )
 
-                if 'YES' in response_text:
+                is_verification = 'YES' in response_text
+                await self._file_dao.set_verification_check_result(
+                    file_id=file.id,
+                    is_verification_of_medical_necessity=is_verification,
+                )
+
+                if is_verification:
                     logger.info(
                         'Found Verification of Medical Necessity in file: %s',
                         file.filename,
@@ -1386,7 +1523,10 @@ Necessity document, or "NO" if it is not."""
                     ),
                     file.filename,
                 )
-                # Continue checking other files if one fails
+                # Continue checking other files if one fails - and leave
+                # this file's cache unset, so a transient failure
+                # (download, LLM call) gets retried next time rather
+                # than being cached as a false negative.
                 continue
 
         return False
@@ -2060,14 +2200,24 @@ Necessity document, or "NO" if it is not."""
                 content, content_type = self._s3_actions.download_from_s3(
                     file.s3_key
                 )
-            except Exception:
+            except Exception as exc:
+                # Abort rather than send a partial package: silently
+                # dropping this attachment and faxing what's left would
+                # mark the request SUBMITTED even though Novitas never
+                # received one of its supporting documents.
                 logger.exception(
                     'Failed to download supporting document %s for '
-                    'Novitas submission (request %s)',
+                    'Novitas submission (request %s); aborting submission '
+                    'rather than sending an incomplete package',
                     file.id,
                     request_id,
                 )
-                continue
+                raise AmbulanceRequestPDFGenerationException(  # noqa: TRY003
+                    f'Failed to retrieve supporting document '
+                    f'"{file.filename}" for submission. Submission '
+                    f'aborted rather than sending an incomplete package '
+                    f'to Novitas.'
+                ) from exc
             attachments.append((file.filename, content, content_type))
 
         fax = await self._fax_service.send_outbound_fax(

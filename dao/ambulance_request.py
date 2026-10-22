@@ -518,6 +518,7 @@ class RequestFileDAO(BaseDAO):
         self,
         *,
         request_id: int | None,
+        uploaded_by_user_id: int,
         filename: str,
         s3_key: str,
         file_size: int,
@@ -527,6 +528,9 @@ class RequestFileDAO(BaseDAO):
 
         Args:
             request_id: ID of the request (nullable for temporary files).
+            uploaded_by_user_id: ID of the user uploading the file - the
+                authorization boundary for later linking this file to a
+                request.
             filename: Original filename.
             s3_key: S3 object key.
             file_size: File size in bytes.
@@ -538,6 +542,7 @@ class RequestFileDAO(BaseDAO):
         """
         request_file = RequestFile(
             request_id=request_id,
+            uploaded_by_user_id=uploaded_by_user_id,
             filename=filename,
             s3_key=s3_key,
             file_size=file_size,
@@ -565,19 +570,30 @@ class RequestFileDAO(BaseDAO):
     async def get_by_ids(
         self,
         file_ids: list[int],
+        uploaded_by_user_id: int,
     ) -> list[RequestFile]:
-        """Get files by list of IDs.
+        """Get files by list of IDs, scoped to the uploading user.
+
+        A file whose uploaded_by_user_id doesn't match (including a
+        pre-existing NULL row) is silently excluded rather than
+        returned - callers that treat a missing ID as "not found" get
+        that behavior for free, instead of leaking another user's file.
 
         Args:
             file_ids: List of file IDs.
+            uploaded_by_user_id: ID of the user who must own every
+                returned file.
 
         Returns:
-            list[RequestFile]: List of file instances.
+            list[RequestFile]: List of file instances the user owns.
 
         """
         if not file_ids:
             return []
-        stmt = select(RequestFile).where(RequestFile.id.in_(file_ids))
+        stmt = select(RequestFile).where(
+            RequestFile.id.in_(file_ids),
+            RequestFile.uploaded_by_user_id == uploaded_by_user_id,
+        )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
@@ -599,12 +615,54 @@ class RequestFileDAO(BaseDAO):
         self,
         file_id: int,
         request_id: int,
+        uploaded_by_user_id: int,
     ) -> RequestFile | None:
-        """Update request_id for a file.
+        """Link a file to a request, if the caller owns and can claim it.
+
+        Only links a file that was uploaded by uploaded_by_user_id AND
+        is not already linked to a (possibly different, possibly
+        another user's) request - without this, any authenticated user
+        could reassign an arbitrary file_id, including one already
+        attached to someone else's submitted request, onto their own.
 
         Args:
             file_id: File ID.
             request_id: Request ID to link.
+            uploaded_by_user_id: ID of the user who must own the file
+                for the link to succeed.
+
+        Returns:
+            RequestFile | None: Updated file instance, or None if no
+                matching unlinked file owned by this user exists.
+
+        """
+        stmt = (
+            update(RequestFile)
+            .where(
+                RequestFile.id == file_id,
+                RequestFile.uploaded_by_user_id == uploaded_by_user_id,
+                RequestFile.request_id.is_(None),
+            )
+            .values(request_id=request_id)
+            .returning(RequestFile)
+        )
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        return result.scalar_one_or_none()
+
+    async def set_verification_check_result(
+        self,
+        file_id: int,
+        *,
+        is_verification_of_medical_necessity: bool,
+    ) -> RequestFile | None:
+        """Cache the AI content-check result for a file.
+
+        Args:
+            file_id: File ID.
+            is_verification_of_medical_necessity: Whether this file was
+                found to be a Verification of Medical Necessity
+                document.
 
         Returns:
             RequestFile | None: Updated file instance or None if not found.
@@ -613,7 +671,11 @@ class RequestFileDAO(BaseDAO):
         stmt = (
             update(RequestFile)
             .where(RequestFile.id == file_id)
-            .values(request_id=request_id)
+            .values(
+                is_verification_of_medical_necessity=(
+                    is_verification_of_medical_necessity
+                )
+            )
             .returning(RequestFile)
         )
         result = await self._session.execute(stmt)
