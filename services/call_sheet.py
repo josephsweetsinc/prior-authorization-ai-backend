@@ -114,6 +114,7 @@ class CallSheetService:
 
         doc = fitz.open(self._template_path)
         try:
+            self._strip_unsafe_actions(doc)
             filled_count = 0
             for page_num in range(doc.page_count):
                 page = doc[page_num]
@@ -134,7 +135,7 @@ class CallSheetService:
                     widget.field_value = value
                     widget.update()
                     filled_count += 1
-            pdf_bytes: bytes = doc.tobytes()
+            pdf_bytes: bytes = doc.tobytes(garbage=4)
         finally:
             doc.close()
 
@@ -146,6 +147,41 @@ class CallSheetService:
             len(pdf_bytes),
         )
         return pdf_bytes
+
+    @staticmethod
+    def _strip_unsafe_actions(doc: fitz.Document) -> None:
+        """Remove the template's embedded scripts and Submit button.
+
+        The template carries a "Submit Form" button whose click action
+        runs a script with a hardcoded ``mailto:`` SUBMITURL, which would
+        email a filled-in copy of the form - with real patient data -
+        outside the app entirely. The catalog also carries a
+        WillSave action that runs a (now-inert) script automatically on
+        every save, and a document JavaScript entry used by the submit
+        dialog. None of these are referenced by the AcroForm/Fields
+        structure, so removing them leaves every other field on the
+        template fully fillable.
+
+        Args:
+            doc: The opened template document, modified in place.
+
+        """
+        catalog_xref = doc.pdf_catalog()  # type: ignore[attr-defined]
+        doc.xref_set_key(catalog_xref, 'AA', 'null')  # type: ignore[attr-defined]
+        names_xref = doc.xref_get_key(  # type: ignore[attr-defined]
+            catalog_xref, 'Names'
+        )
+        if names_xref[0] == 'xref':
+            names_obj_xref = int(names_xref[1].split()[0])
+            doc.xref_set_key(  # type: ignore[attr-defined]
+                names_obj_xref, 'JavaScript', 'null'
+            )
+
+        for page_num in range(doc.page_count):
+            page = doc[page_num]
+            for widget in page.widgets() or []:  # type: ignore[attr-defined]
+                if widget.field_type_string == 'Button':
+                    page.delete_widget(widget)  # type: ignore[attr-defined]
 
     def get_editable_field_names(self) -> frozenset[str]:
         """Get the template's field names that can be set interactively.

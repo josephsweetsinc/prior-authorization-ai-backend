@@ -1,6 +1,5 @@
 """Tests for organization endpoints."""
 
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -9,7 +8,7 @@ from fastapi.testclient import TestClient
 from dependencies.auth import get_provider_user_from_token
 from main import app
 from models.user import UserRole
-from schemas import OrganizationResponseSchema, UpdateOrganizationRequestSchema
+from schemas import OrganizationResponseSchema
 
 
 @pytest.fixture
@@ -61,6 +60,10 @@ class TestOrganizationEndpoints:
                 medic_name=update_data["medic_name"],
                 provider_type=update_data["provider_type"],
                 professional_id=update_data["professional_id"],
+                npi=None,
+                address=None,
+                phone=None,
+                fax=None,
             )
 
             response = client.patch(

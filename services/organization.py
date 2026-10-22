@@ -72,6 +72,10 @@ class OrganizationService(BaseService):
                 provider_type=organization_data.provider_type,
                 professional_id=organization_data.professional_id,
                 medic_name=organization_data.medic_name,
+                npi=organization_data.npi,
+                address=organization_data.address,
+                phone=organization_data.phone,
+                fax=organization_data.fax,
             )
         else:
             # Update existing organization
@@ -80,6 +84,10 @@ class OrganizationService(BaseService):
                 provider_type=organization_data.provider_type,
                 professional_id=organization_data.professional_id,
                 medic_name=organization_data.medic_name,
+                npi=organization_data.npi,
+                address=organization_data.address,
+                phone=organization_data.phone,
+                fax=organization_data.fax,
             )
 
         await self._session.commit()

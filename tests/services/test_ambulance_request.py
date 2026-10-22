@@ -27,6 +27,7 @@ from exceptions import (
 from exceptions.file import IncorrectFileSizeException, UnknownFiletypeException
 from models.ambulance_request import (
     NovitasStatus,
+    ProcedureCode,
     RequestStatus,
     TransportationType,
 )
@@ -1059,6 +1060,9 @@ class TestAmbulanceRequestService:
         request.novitas_status = NovitasStatus.NOT_SUBMITTED
         request.novitas_submitted_at = None
         request.call_sheet_data = None
+        request.number_of_trips = None
+        request.authorization_start_date = None
+        request.procedure_code = ProcedureCode.A0428
         request.created_at = datetime.now(UTC)
         request.updated_at = datetime.now(UTC)
         request.reviewer_id = None
@@ -2234,7 +2238,8 @@ class TestPHIAccessLogging:
             )
         )
         service._pdf_generator_service = MagicMock()
-        service._pdf_generator_service.generate_cms_10344_pdf.return_value = (
+        mock_pdf_service = service._pdf_generator_service
+        mock_pdf_service.generate_novitas_cover_sheet_pdf.return_value = (
             b'%PDF-fake'
         )
         await service.generate_pdf(request_id=request.id, user=user)
@@ -2445,7 +2450,8 @@ class TestSubmitToNovitas:
             '+15559990000'
         )
         service._pdf_generator_service = MagicMock()
-        service._pdf_generator_service.generate_cms_10344_pdf.return_value = (
+        mock_pdf_service = service._pdf_generator_service
+        mock_pdf_service.generate_novitas_cover_sheet_pdf.return_value = (
             b'%PDF-cms'
         )
         service._file_dao.get_by_request_id = AsyncMock(return_value=[])
@@ -2493,7 +2499,8 @@ class TestSubmitToNovitas:
             '+15559990000'
         )
         service._pdf_generator_service = MagicMock()
-        service._pdf_generator_service.generate_cms_10344_pdf.return_value = (
+        mock_pdf_service = service._pdf_generator_service
+        mock_pdf_service.generate_novitas_cover_sheet_pdf.return_value = (
             b'%PDF-cms'
         )
         fake_file = MagicMock(id=1, filename='pcs.pdf', s3_key='key/pcs.pdf')
