@@ -31,7 +31,7 @@ from models.ambulance_request import (
     RequestStatus,
     TransportationType,
 )
-from models.incoming_fax import FaxStatus
+from models.incoming_fax import FaxDirection, FaxStatus
 from models.request_access_log import PHIAccessAction
 from models.user import UserRole
 from schemas.ai_extraction import (
@@ -1560,6 +1560,19 @@ class TestCreateDraftRequestFromFax:
         )
         return mock
 
+    @pytest.fixture
+    def mock_ai_service_raises(self) -> MagicMock:
+        """Create a mock AIExtractionService that raises instead of
+        returning a non-success status - simulating a transport-level
+        failure (timeout, provider error) rather than a clean
+        "extraction didn't work out" response.
+        """  # noqa: D205
+        mock = MagicMock(spec=AIExtractionService)
+        mock.extract_data_from_files = AsyncMock(
+            side_effect=RuntimeError('AI provider unreachable')
+        )
+        return mock
+
     def _make_service(
         self, db_session, mock_ai_service
     ) -> AmbulanceRequestService:
@@ -1719,6 +1732,41 @@ class TestCreateDraftRequestFromFax:
         draft = await service.create_draft_request_from_fax(fax.id)
 
         assert draft is None
+        await db_session.refresh(fax)
+        assert fax.status.value == 'unresolved'
+
+    @pytest.mark.asyncio
+    async def test_extraction_exception_does_not_leave_fax_stuck(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_raises,
+    ):
+        """Test that an exception during extraction (not just a clean
+        non-success status) still gets the fax out of PROCESSING.
+
+        PROCESSING is committed before the AI call so the fax isn't
+        left looking un-picked-up while extraction is in flight. If
+        extraction then raises instead of returning cleanly, nothing
+        ever moved the fax off PROCESSING - and since this method
+        only ever processes faxes still at RECEIVED, no later call
+        (automatic retry or otherwise) could pick it back up. The
+        fax must end up UNRESOLVED, not stuck, and the original error
+        should still surface rather than being swallowed silently.
+        """
+        await user_factory(email='admin@example.com', role=UserRole.ADMIN)
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-raises',
+            s3_key='faxes/inbound/rc-draft-raises.pdf',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_raises)
+
+        with pytest.raises(RuntimeError, match='AI provider unreachable'):
+            await service.create_draft_request_from_fax(fax.id)
+
         await db_session.refresh(fax)
         assert fax.status.value == 'unresolved'
 
@@ -2476,6 +2524,61 @@ class TestSubmitToNovitas:
         assert request.novitas_status == NovitasStatus.SUBMITTED
         assert request.novitas_fax_id == 42
         assert request.novitas_submitted_at is not None
+
+    @pytest.mark.asyncio
+    async def test_recovers_from_crash_after_fax_sent_without_resending(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a retry after a crash between the physical fax
+        send and the status commit recovers instead of resubmitting.
+
+        send_outbound_fax commits its IncomingFax record before this
+        method marks the request SUBMITTED. If the process died in
+        that window, novitas_status is still NOT_SUBMITTED even
+        though Novitas already has the fax - a naive retry would call
+        submit_to_novitas again and send a duplicate. This simulates
+        that crash by creating the outbound fax record directly (as
+        send_outbound_fax itself would have) without updating the
+        request, then calling submit_to_novitas again.
+        """  # noqa: D205
+        admin = await user_factory(
+            email='novitas-recover-admin@example.com', role=UserRole.ADMIN
+        )
+        owner = await user_factory(
+            email='novitas-recover-owner@example.com'
+        )
+        request = await ambulance_request_factory(
+            user_id=owner.id, status=RequestStatus.APPROVED
+        )
+        await db_session.commit()
+        self._mock_can_submit(service)
+        Settings.load().ringcentral_settings.NOVITAS_FAX_NUMBER = (
+            '+15559990000'
+        )
+        fax_dao = IncomingFaxDAO(db_session)
+        already_sent_fax = await fax_dao.create(
+            provider_message_id='rc-already-sent',
+            direction=FaxDirection.OUTBOUND,
+            status=FaxStatus.SENT,
+            to_number='+15559990000',
+            request_id=request.id,
+        )
+        await db_session.commit()
+
+        result = await service.submit_to_novitas(
+            request_id=request.id, user=admin
+        )
+
+        assert result.novitas_status == NovitasStatus.SUBMITTED
+        service._fax_service.send_outbound_fax.assert_not_called()
+
+        await db_session.refresh(request)
+        assert request.novitas_status == NovitasStatus.SUBMITTED
+        assert request.novitas_fax_id == already_sent_fax.id
 
     @pytest.mark.asyncio
     async def test_success_includes_supporting_documents(

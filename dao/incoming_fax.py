@@ -98,6 +98,35 @@ class IncomingFaxDAO(BaseDAO):
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_outbound_by_request_id(
+        self,
+        request_id: int,
+    ) -> IncomingFax | None:
+        """Get the outbound fax already sent for an ambulance request.
+
+        Used to detect that a previous submission attempt physically
+        sent the fax but crashed before the caller could record that
+        on the request, so a retry can recover instead of re-sending.
+
+        Args:
+            request_id: ID of the ambulance request.
+
+        Returns:
+            IncomingFax | None: The outbound fax for this request, or
+                None if none has been sent yet.
+
+        """
+        stmt = (
+            select(IncomingFax)
+            .where(
+                IncomingFax.request_id == request_id,
+                IncomingFax.direction == FaxDirection.OUTBOUND,
+            )
+            .order_by(IncomingFax.id.asc())
+        )
+        result = await self._session.execute(stmt)
+        return result.scalars().first()
+
     async def get_all(
         self,
         *,

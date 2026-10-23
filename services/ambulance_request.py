@@ -565,6 +565,11 @@ class AmbulanceRequestService(BaseService):
                 each case the fax is marked UNRESOLVED for manual
                 review).
 
+        Raises:
+            Exception: Re-raises whatever error occurred during or
+                after extraction, after marking the fax UNRESOLVED so
+                it isn't left stuck at PROCESSING.
+
         """
         fax = await self._incoming_fax_dao.get_by_id(fax_id)
         if not fax or fax.status != FaxStatus.RECEIVED or not fax.s3_key:
@@ -612,37 +617,64 @@ class AmbulanceRequestService(BaseService):
             await self._session.commit()
             return None
 
-        ai_response = await self._ai_extraction_service.extract_data_from_files(
-            file_s3_keys=[fax.s3_key],
-        )
-        extraction_status = (ai_response.extraction_metadata or {}).get(
-            'status'
-        )
-        if extraction_status != 'success':
-            logger.warning(
-                'AI extraction did not succeed for fax %s (%s), '
-                'marking unresolved',
-                fax_id,
-                extraction_status,
+        try:
+            ai_response = (
+                await self._ai_extraction_service.extract_data_from_files(
+                    file_s3_keys=[fax.s3_key],
+                )
             )
+            extraction_status = (ai_response.extraction_metadata or {}).get(
+                'status'
+            )
+            if extraction_status != 'success':
+                logger.warning(
+                    'AI extraction did not succeed for fax %s (%s), '
+                    'marking unresolved',
+                    fax_id,
+                    extraction_status,
+                )
+                await self._incoming_fax_dao.update_status(
+                    fax_id=fax_id, status=FaxStatus.UNRESOLVED
+                )
+                await self._session.commit()
+                return None
+
+            draft_request = await self._request_dao.create(
+                **self._build_draft_request_kwargs(
+                    ai_response.extracted_data, user_id=owning_user.id
+                )
+            )
+            await self._session.flush()
+            await self._fax_service.link_fax_to_request(
+                fax_id=fax_id,
+                request_id=draft_request.id,
+                matched_by_user_id=None,
+            )
+            await self._session.refresh(draft_request)
+        except Exception:
+            # PROCESSING was already committed above so the fax doesn't
+            # sit at RECEIVED while extraction is in flight - but that
+            # means a failure here (AI service error, DB error while
+            # creating the draft, etc.) would otherwise leave the fax
+            # stuck at PROCESSING forever: create_draft_request_from_fax
+            # only ever picks up faxes still at RECEIVED, so nothing -
+            # automatic retry or manual action - could ever process it
+            # again. Fall back to UNRESOLVED instead, same as every
+            # other "couldn't auto-draft this" case, so it's recoverable
+            # via manual review.
+            logger.exception(
+                'Fax %s auto-processing failed after entering '
+                'PROCESSING; marking unresolved instead of leaving it '
+                'stuck',
+                fax_id,
+            )
+            await self._session.rollback()
             await self._incoming_fax_dao.update_status(
                 fax_id=fax_id, status=FaxStatus.UNRESOLVED
             )
             await self._session.commit()
-            return None
+            raise
 
-        draft_request = await self._request_dao.create(
-            **self._build_draft_request_kwargs(
-                ai_response.extracted_data, user_id=owning_user.id
-            )
-        )
-        await self._session.flush()
-        await self._fax_service.link_fax_to_request(
-            fax_id=fax_id,
-            request_id=draft_request.id,
-            matched_by_user_id=None,
-        )
-        await self._session.refresh(draft_request)
         logger.info(
             'Auto-created draft request %s from fax %s',
             draft_request.id,
@@ -2123,6 +2155,11 @@ Necessity document, or "NO" if it is not."""
         workflow: it only runs after an admin has approved the request
         (the single approval gate) and only once per request.
 
+        If a retried call finds that a prior attempt already sent the
+        fax (committed by send_outbound_fax) but never got to record
+        that on the request, it recovers the request's status from
+        that fax record instead of sending a duplicate to Novitas.
+
         Args:
             request_id: ID of the request to submit.
             user: Current authenticated user (must be admin).
@@ -2155,6 +2192,36 @@ Necessity document, or "NO" if it is not."""
                 'Request has already been submitted to Novitas '
                 f'(status: {request.novitas_status.value})'
             )
+
+        # send_outbound_fax physically sends the fax and commits the
+        # IncomingFax record before this method goes on to mark the
+        # request SUBMITTED below. If the process dies in that window,
+        # novitas_status is left at NOT_SUBMITTED even though Novitas
+        # already received the fax, so a retry of this call would send
+        # it again. Recover using that already-committed fax record
+        # as the durable marker, instead of resubmitting.
+        already_sent_fax = (
+            await self._incoming_fax_dao.get_outbound_by_request_id(
+                request_id
+            )
+        )
+        if already_sent_fax:
+            logger.warning(
+                'Request %s has an outbound Novitas fax (id=%s) already '
+                'recorded but novitas_status was never updated - '
+                'recovering without resending',
+                request_id,
+                already_sent_fax.id,
+            )
+            request.novitas_status = NovitasStatus.SUBMITTED
+            request.novitas_submitted_at = (
+                already_sent_fax.created_at or datetime.now(UTC)
+            )
+            request.novitas_fax_id = already_sent_fax.id
+            await self._session.flush()
+            await self._session.commit()
+            await self._session.refresh(request)
+            return AmbulanceRequestResponseSchema.model_validate(request)
 
         completion_status = await self.get_completion_status(request=request)
         if not completion_status.can_submit:
