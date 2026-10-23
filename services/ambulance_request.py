@@ -2067,9 +2067,8 @@ Necessity document, or "NO" if it is not."""
 
         Like the Call Sheet, this does not require full completion-status
         validation - it is a data summary reviewable at any stage, and
-        clearly marks which CMS-1500 fields (service lines, billing
-        provider info) are not yet available from prior authorization
-        data.
+        clearly marks which CMS-1500 fields (charges, coded diagnosis)
+        are not yet available from prior authorization data.
 
         Args:
             request_id: ID of the request to generate the CMS-1500 for.
@@ -2097,8 +2096,11 @@ Necessity document, or "NO" if it is not."""
             action=PHIAccessAction.DOWNLOAD_CMS1500,
         )
 
+        organization = await self._organization_dao.get_by_user_id(
+            request.user_id
+        )
         pdf_bytes = self._cms1500_generator_service.generate_cms1500_pdf(
-            request=request
+            request=request, organization=organization
         )
 
         logger.info(
