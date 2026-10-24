@@ -184,11 +184,21 @@ class FaxService(BaseService):
         exists (e.g. RingCentral redelivered the same webhook event),
         the existing record is returned without reprocessing.
 
+        If any step fails (fetching the message, downloading the
+        attachment, or uploading to S3), a FAILED placeholder record
+        is still saved before the error propagates, so the fax isn't
+        lost without a trace - the webhook response to RingCentral
+        doesn't change, so there is no retry to rely on.
+
         Args:
             message_id: RingCentral message ID.
 
         Returns:
             IncomingFax | None: The stored (or pre-existing) fax record.
+
+        Raises:
+            Exception: Re-raises whatever error caused processing to
+                fail, after recording the FAILED placeholder.
 
         """
         existing = await self._fax_dao.get_by_provider_message_id(
@@ -202,22 +212,86 @@ class FaxService(BaseService):
             )
             return existing
 
-        message = await self._ringcentral_client.get_message(message_id)
-        from_number = message.get('from', {}).get('phoneNumber')
-        to_recipients = message.get('to', [])
-        to_number = (
-            to_recipients[0].get('phoneNumber') if to_recipients else None
-        )
-        page_count = message.get('faxPageCount') or message.get('pages')
-
-        attachment = self._ringcentral_client.get_document_attachment(
-            message
-        )
-        if not attachment:
-            logger.warning(
-                'Fax message %s has no document attachment', message_id
+        from_number: str | None = None
+        to_number: str | None = None
+        page_count: int | None = None
+        try:
+            message = await self._ringcentral_client.get_message(message_id)
+            from_number = message.get('from', {}).get('phoneNumber')
+            to_recipients = message.get('to', [])
+            to_number = (
+                to_recipients[0].get('phoneNumber')
+                if to_recipients
+                else None
             )
-            fax, _ = await self._create_fax_idempotently(
+            page_count = message.get('faxPageCount') or message.get('pages')
+
+            attachment = self._ringcentral_client.get_document_attachment(
+                message
+            )
+            if not attachment:
+                logger.warning(
+                    'Fax message %s has no document attachment', message_id
+                )
+                fax, _ = await self._create_fax_idempotently(
+                    provider_message_id=message_id,
+                    direction=FaxDirection.INBOUND,
+                    status=FaxStatus.FAILED,
+                    from_number=from_number,
+                    to_number=to_number,
+                    page_count=page_count,
+                )
+                return fax
+
+            content, content_type = (
+                await self._ringcentral_client.download_attachment(
+                    message_id=message_id,
+                    attachment_id=str(attachment['id']),
+                )
+            )
+
+            extension = (
+                '.pdf' if content_type == 'application/pdf' else '.tiff'
+            )
+            s3_key = generate_storage_key(
+                prefix=FAX_STORAGE_PREFIX,
+                file_extension=extension,
+            )
+            self._s3_actions.upload_to_s3(
+                s3_key,
+                io.BytesIO(content),
+                content_type,
+                metadata={'ringcentral_message_id': message_id},
+            )
+
+            fax, created = await self._create_fax_idempotently(
+                provider_message_id=message_id,
+                direction=FaxDirection.INBOUND,
+                status=FaxStatus.RECEIVED,
+                from_number=from_number,
+                to_number=to_number,
+                page_count=page_count,
+                s3_key=s3_key,
+                content_type=content_type,
+                file_size=len(content),
+            )
+        except Exception:
+            # Fetching the message, downloading the attachment, or
+            # uploading to S3 can all fail. The webhook endpoint still
+            # responds 200 to RingCentral regardless (see
+            # process_webhook_payload), so RingCentral will never retry
+            # this message - if no record is saved here, the fax is
+            # gone with no trace. Record a FAILED placeholder
+            # (idempotently, in case this is itself a concurrent
+            # redelivery) so it's at least visible for manual recovery,
+            # then let the failure continue to propagate/log as before.
+            logger.exception(
+                'Failed to process inbound fax message %s; recording a '
+                'FAILED placeholder so the delivery is not silently lost',
+                message_id,
+            )
+            await self._session.rollback()
+            await self._create_fax_idempotently(
                 provider_message_id=message_id,
                 direction=FaxDirection.INBOUND,
                 status=FaxStatus.FAILED,
@@ -225,38 +299,7 @@ class FaxService(BaseService):
                 to_number=to_number,
                 page_count=page_count,
             )
-            return fax
-
-        content, content_type = (
-            await self._ringcentral_client.download_attachment(
-                message_id=message_id,
-                attachment_id=str(attachment['id']),
-            )
-        )
-
-        extension = '.pdf' if content_type == 'application/pdf' else '.tiff'
-        s3_key = generate_storage_key(
-            prefix=FAX_STORAGE_PREFIX,
-            file_extension=extension,
-        )
-        self._s3_actions.upload_to_s3(
-            s3_key,
-            io.BytesIO(content),
-            content_type,
-            metadata={'ringcentral_message_id': message_id},
-        )
-
-        fax, created = await self._create_fax_idempotently(
-            provider_message_id=message_id,
-            direction=FaxDirection.INBOUND,
-            status=FaxStatus.RECEIVED,
-            from_number=from_number,
-            to_number=to_number,
-            page_count=page_count,
-            s3_key=s3_key,
-            content_type=content_type,
-            file_size=len(content),
-        )
+            raise
         if not created:
             # A concurrent request already created and is processing
             # this fax - treat it exactly like the early-return above.

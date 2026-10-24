@@ -262,6 +262,68 @@ class TestFaxService:
         mock_commit.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_process_inbound_message_download_failure_is_not_lost(
+        self,
+        service,
+        mock_ringcentral_client,
+        mock_process_inbound_fax_task,
+        db_session,
+    ):
+        """Test that a failure after get_message still leaves a durable
+        record, instead of the fax vanishing with no trace.
+
+        The webhook endpoint always responds 200 to RingCentral
+        regardless of what happens here, so RingCentral never retries
+        a failed delivery - if no record is saved before the error
+        propagates, the fax is gone for good. A download failure
+        (attachment fetch, S3 upload, etc.) must still result in a
+        FAILED record carrying whatever message details were already
+        known, and the original error must still surface so it isn't
+        silently swallowed at this layer.
+        """
+        mock_ringcentral_client.download_attachment = AsyncMock(
+            side_effect=RuntimeError('RingCentral attachment fetch failed')
+        )
+
+        with pytest.raises(
+            RuntimeError, match='RingCentral attachment fetch failed'
+        ):
+            await service.process_inbound_message('rc-download-fail')
+
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.get_by_provider_message_id('rc-download-fail')
+        assert fax is not None
+        assert fax.status == FaxStatus.FAILED
+        assert fax.from_number == '+15551234567'
+        assert fax.to_number == '+15557654321'
+        mock_process_inbound_fax_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_process_inbound_message_get_message_failure_is_not_lost(
+        self,
+        service,
+        mock_ringcentral_client,
+        db_session,
+    ):
+        """Test that a failure fetching the message itself (before any
+        details are known) still leaves a FAILED placeholder record.
+        """
+        mock_ringcentral_client.get_message = AsyncMock(
+            side_effect=RuntimeError('RingCentral API unreachable')
+        )
+
+        with pytest.raises(RuntimeError, match='RingCentral API unreachable'):
+            await service.process_inbound_message('rc-get-message-fail')
+
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.get_by_provider_message_id(
+            'rc-get-message-fail'
+        )
+        assert fax is not None
+        assert fax.status == FaxStatus.FAILED
+        assert fax.from_number is None
+
+    @pytest.mark.asyncio
     async def test_process_webhook_payload_processes_all_fax_ids(
         self, service
     ):
