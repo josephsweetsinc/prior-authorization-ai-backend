@@ -3,17 +3,16 @@
 
 # Application Configuration
 #
-# Must be distinct from prod's domain (api.infopaai.com) - the EC2
-# module requests a Let's Encrypt cert for this exact hostname via
-# certbot's HTTP-01 challenge, which fails if DNS for it doesn't
-# already point at this environment's own instance. Before running
-# deploy-project.yml for dev, create a DNS A record for this
-# subdomain pointing at the dev instance's public IP (available as
-# the ec2_public_ip Terraform output after the instance exists - so
-# provision once with an empty domain, point DNS at the resulting IP,
-# then re-apply with this domain set, or reserve/assign the IP ahead
-# of time if this account uses an Elastic IP for it).
-domain        = "dev-api.infopaai.com"
+# Intentionally blank for the first provisioning pass: the instance's
+# public IP isn't known until after it exists, so DNS for
+# dev-api.infopaai.com can't point at it yet, and certbot's HTTP-01
+# challenge would just fail on first boot. The box comes up on plain
+# HTTP for now. Once provisioned, point a DNS A record for
+# dev-api.infopaai.com at the ec2_public_ip Terraform output, then set
+# domain back to "dev-api.infopaai.com" here and either re-apply
+# (replaces the instance - fine once DNS already points at a
+# reserved/known IP) or run certbot by hand on the existing box.
+domain        = ""
 
 # EC2 Configuration
 instance_type = "t4g.small"
