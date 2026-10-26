@@ -5,6 +5,7 @@ import logging
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
+from xml.sax.saxutils import escape as xml_escape
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
     from reportlab.platypus.doctemplate import BaseDocTemplate
 
 from models.ambulance_request import AmbulanceRequest
+from models.organization import Organization
 
 logger = logging.getLogger(__name__)
 
@@ -49,22 +51,34 @@ class CMS1500GeneratorService:
     This is a data summary of the fields on the standard CMS-1500 Health
     Insurance Claim Form (labeled with the form's real box numbers for
     traceability), not a print-ready reproduction of the official
-    red-ink form - real CMS-1500 claims are normally filed electronically
-    (837P) or by mail with a MAC, not generated as a standalone PDF.
-    Service-line data (CPT/HCPCS codes, charges, days/units - Box 24) is
-    not included, since this system does not yet model billing rates or
-    procedure codes; that section is left as a note for billing staff.
+    red-ink form, and not a submission mechanism - PAAI is a prior
+    authorization workflow, not a billing/claims system; real claims
+    are filed electronically (837P) through the provider's own
+    clearinghouse once a trip is complete. This PDF is the handoff
+    artifact from an approved PA to that separate billing process.
+    Charges and a coded diagnosis pointer (ICD-10) still aren't
+    available from prior authorization data, since this system doesn't
+    model a fee schedule or coded diagnoses - that part is still left
+    as a note for billing staff. The procedure code/units (Box 24) and
+    billing/facility provider identity (Box 32/33) are available and
+    filled in.
 
     """
 
     def generate_cms1500_pdf(  # noqa: PLR0915
         self,
         request: AmbulanceRequest,
+        organization: Organization | None = None,
     ) -> bytes:
         """Generate a CMS-1500 claim data summary PDF.
 
         Args:
             request: AmbulanceRequest instance with all required fields.
+            organization: The submitting user's Organization, for the
+                billing/facility provider's NPI/address/contact fields
+                (Box 32/33). May be None if the organization profile
+                hasn't been set up yet, in which case those fields are
+                left blank.
 
         Returns:
             bytes: PDF file bytes.
@@ -76,8 +90,8 @@ class CMS1500GeneratorService:
 
         left_margin = 15 * mm
         right_margin = 15 * mm
-        top_margin = 36 * mm
-        bottom_margin = 15 * mm
+        top_margin = 33 * mm
+        bottom_margin = 10 * mm
 
         doc = SimpleDocTemplate(
             buffer,
@@ -121,8 +135,8 @@ class CMS1500GeneratorService:
             fontSize=12,
             leading=16,
             textColor=colors.HexColor('#111827'),
-            spaceAfter=10,
-            spaceBefore=5,
+            spaceAfter=6,
+            spaceBefore=3,
             fontName='Helvetica-Bold',
             textTransform='uppercase',
         )
@@ -220,7 +234,7 @@ class CMS1500GeneratorService:
             return [
                 Paragraph(label_text, label_style),
                 Paragraph(str(value_text), value_style),
-                Spacer(1, 3 * mm),
+                Spacer(1, 1.5 * mm),
             ]
 
         available_width = A4[0] - left_margin - right_margin
@@ -282,13 +296,13 @@ class CMS1500GeneratorService:
         )
         story.append(s1b_table)
 
-        story.append(Spacer(1, 2 * mm))
+        story.append(Spacer(1, 1 * mm))
         story.append(
             HRFlowable(
                 width='100%', thickness=0.5, color=colors.HexColor('#E5E7EB')
             )
         )
-        story.append(Spacer(1, 3 * mm))
+        story.append(Spacer(1, 1.5 * mm))
 
         # Box 2 / 3: PATIENT INFORMATION
         story.append(Paragraph('2. PATIENT INFORMATION', section_style))
@@ -332,13 +346,13 @@ class CMS1500GeneratorService:
         )
         story.append(s2_table)
 
-        story.append(Spacer(1, 2 * mm))
+        story.append(Spacer(1, 1 * mm))
         story.append(
             HRFlowable(
                 width='100%', thickness=0.5, color=colors.HexColor('#E5E7EB')
             )
         )
-        story.append(Spacer(1, 3 * mm))
+        story.append(Spacer(1, 1.5 * mm))
 
         # Box 21: DIAGNOSIS
         story.append(Paragraph('3. DIAGNOSIS', section_style))
@@ -358,13 +372,13 @@ class CMS1500GeneratorService:
         )
         story.append(s3_table)
 
-        story.append(Spacer(1, 2 * mm))
+        story.append(Spacer(1, 1 * mm))
         story.append(
             HRFlowable(
                 width='100%', thickness=0.5, color=colors.HexColor('#E5E7EB')
             )
         )
-        story.append(Spacer(1, 3 * mm))
+        story.append(Spacer(1, 1.5 * mm))
 
         # Box 17 / 17b: REFERRING / ORDERING PHYSICIAN
         story.append(
@@ -400,13 +414,13 @@ class CMS1500GeneratorService:
         )
         story.append(s4_table)
 
-        story.append(Spacer(1, 2 * mm))
+        story.append(Spacer(1, 1 * mm))
         story.append(
             HRFlowable(
                 width='100%', thickness=0.5, color=colors.HexColor('#E5E7EB')
             )
         )
-        story.append(Spacer(1, 3 * mm))
+        story.append(Spacer(1, 1.5 * mm))
 
         # Box 23: PRIOR AUTHORIZATION
         story.append(Paragraph('5. PRIOR AUTHORIZATION', section_style))
@@ -433,28 +447,122 @@ class CMS1500GeneratorService:
             )
         )
 
-        story.append(Spacer(1, 2 * mm))
+        story.append(Spacer(1, 1 * mm))
         story.append(
             HRFlowable(
                 width='100%', thickness=0.5, color=colors.HexColor('#E5E7EB')
             )
         )
-        story.append(Spacer(1, 3 * mm))
+        story.append(Spacer(1, 1.5 * mm))
 
-        # Box 24 / 25 / 32 / 33: SERVICE LINE & BILLING
-        story.append(
-            Paragraph('6. SERVICE LINE & BILLING', section_style)
+        # Box 24: SERVICE LINE
+        story.append(Paragraph('6. SERVICE LINE', section_style))
+
+        service_date = (
+            request.date_of_transport.strftime('%m-%d-%Y')
+            if request.date_of_transport
+            else None
         )
+        procedure_code = request.procedure_code
+
+        svc_col1: list[Any] = []
+        svc_col1.extend(
+            create_field('DATE(S) OF SERVICE (BOX 24A)', service_date)
+        )
+        svc_col1.extend(
+            create_field(
+                'CPT/HCPCS (BOX 24D)',
+                procedure_code.value if procedure_code else None,
+            )
+        )
+
+        svc_col2: list[Any] = []
+        svc_col2.extend(
+            create_field('DAYS OR UNITS (BOX 24G)', request.number_of_trips)
+        )
+
+        s6_table = Table(
+            [[svc_col1, svc_col2]],
+            colWidths=[available_width * 0.5, available_width * 0.5],
+        )
+        s6_table.setStyle(
+            TableStyle(
+                [
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 0),
+                    ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+                ]
+            )
+        )
+        story.append(s6_table)
         story.append(
             Paragraph(
-                'Dates of service, place of service, CPT/HCPCS procedure '
-                'codes, charges, and billing/facility provider '
-                'information (Boxes 24, 25, 32, 33) are not available '
-                'from prior authorization data and must be completed by '
+                'Charges and a coded diagnosis pointer (ICD-10, Box 21 '
+                'line reference for Box 24E) are not available from '
+                'prior authorization data and must be completed by '
                 'billing staff before this claim is submitted.',
                 note_style,
             )
         )
+
+        story.append(Spacer(1, 1 * mm))
+        story.append(
+            HRFlowable(
+                width='100%', thickness=0.5, color=colors.HexColor('#E5E7EB')
+            )
+        )
+        story.append(Spacer(1, 1.5 * mm))
+
+        # Box 32 / 33: BILLING / FACILITY PROVIDER
+        story.append(
+            Paragraph('7. BILLING / FACILITY PROVIDER', section_style)
+        )
+
+        org_name_and_address = '<br/>'.join(
+            xml_escape(part)
+            for part in (
+                organization.medic_name if organization else None,
+                organization.address if organization else None,
+            )
+            if part
+        )
+
+        bill_col1: list[Any] = []
+        bill_col1.extend(
+            create_field(
+                'BILLING/FACILITY PROVIDER NAME AND ADDRESS (BOX 32/33)',
+                org_name_and_address,
+            )
+        )
+
+        bill_col2: list[Any] = []
+        bill_col2.extend(
+            create_field(
+                'NPI (BOX 32A/33A)',
+                organization.npi if organization else None,
+            )
+        )
+        bill_col2.extend(
+            create_field(
+                'PHONE (BOX 33)',
+                organization.phone if organization else None,
+            )
+        )
+
+        s7_table = Table(
+            [[bill_col1, bill_col2]],
+            colWidths=[available_width * 0.5, available_width * 0.5],
+        )
+        s7_table.setStyle(
+            TableStyle(
+                [
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 0),
+                    ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+                ]
+            )
+        )
+        story.append(s7_table)
 
         doc.build(story, onFirstPage=draw_header_on_canvas)
 
