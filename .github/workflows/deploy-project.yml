@@ -1,6 +1,15 @@
 name: Deploy Project
 on:
   workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Terraform environment to provision/update (terraform/environments/<this>)'
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+        default: prod
   # push:
   #   branches:
   #     - main
@@ -10,7 +19,7 @@ env:
   TF_VAR_AWS_REGION: ${{ secrets.AWS_REGION }}
   TF_VAR_SSH_KEY: ${{ secrets.SSH_KEY }}
   TF_VAR_SSH_KEY_PUB: ${{ secrets.SSH_KEY_PUB }}
-  ENVIRONMENT: prod
+  ENVIRONMENT: ${{ inputs.environment }}
 
 jobs:
   create-tfstate-bucket:
