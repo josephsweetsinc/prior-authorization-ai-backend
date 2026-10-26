@@ -6,7 +6,14 @@ on:
        - main
   workflow_dispatch:
 env:
-  ENVIRONMENT: prod
+  # This workflow deploys to the Dev box only. It was previously
+  # hardcoded to "prod" - a copy/paste leftover from deploy-project.yml -
+  # which meant every push to main was deploying straight to the
+  # prod-tagged EC2 instance, with no separate Dev environment actually
+  # in the loop. Production deploys are handled separately, by hand,
+  # via deploy-project.yml (infra) - there is deliberately no
+  # push-triggered workflow that touches prod.
+  ENVIRONMENT: dev
 jobs:
   code_quality:
     name: Code Quality Checks
