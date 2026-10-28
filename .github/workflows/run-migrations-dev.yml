@@ -1,0 +1,62 @@
+name: Run DB migrations on Dev
+
+# Manual tool: applies pending Alembic migrations to the Dev database.
+# Deploys never run migrations automatically - compose.yml's paai_api
+# command just starts uvicorn directly, and deploy-changes-to-dev.yml
+# only rebuilds/restarts containers - so the Dev database's schema can
+# silently fall behind the application code after any PR that adds a
+# migration, surfacing later as a confusing runtime error (e.g.
+# "column ... does not exist") rather than a deploy failure.
+
+on:
+  workflow_dispatch:
+
+env:
+  ENVIRONMENT: dev
+
+jobs:
+  run-migrations:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Get ssh key
+      run: |
+        echo "${{ secrets.SSH_KEY }}" > ../id_ed25519
+        chmod 600 ../id_ed25519
+
+    - name: Get repo name
+      run: |
+        echo "REPO_NAME=${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/}" >> $GITHUB_ENV
+
+    - name: Get ec2 instance IP
+      run: |
+        PUBLIC_IP=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=${{ env.REPO_NAME }}-${{ env.ENVIRONMENT }}" "Name=instance-state-name,Values=running" \
+          --query "Reservations[0].Instances[0].PublicIpAddress" \
+          --output text)
+
+        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+
+    - name: Show current and target migration heads
+      run: |
+        ssh -o StrictHostKeyChecking=no -i ../id_ed25519 ubuntu@${{ env.PUBLIC_IP }} << EOF
+        cd ~/${{ env.REPO_NAME }}
+        echo "--- Current DB revision ---"
+        docker compose exec -T paai_api uv run alembic -c models/alembic.ini current
+        echo "--- Available head(s) in code ---"
+        docker compose exec -T paai_api uv run alembic -c models/alembic.ini heads
+        EOF
+
+    - name: Apply migrations
+      run: |
+        ssh -o StrictHostKeyChecking=no -i ../id_ed25519 ubuntu@${{ env.PUBLIC_IP }} << EOF
+        cd ~/${{ env.REPO_NAME }}
+        docker compose exec -T paai_api uv run alembic -c models/alembic.ini upgrade head
+        EOF
