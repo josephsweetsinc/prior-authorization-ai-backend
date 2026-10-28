@@ -1,0 +1,65 @@
+name: View Dev container logs
+
+# Manual diagnostic tool: pulls recent logs from the Dev box's
+# running containers over SSH. Useful when the app itself is
+# reachable (so deploy-changes-to-dev.yml isn't the thing to check)
+# but a specific request is failing - the frontend only shows a
+# generic error, and the person testing can't open browser DevTools
+# (e.g. a managed/work laptop with it disabled by policy).
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Which container's logs to show"
+        required: true
+        type: choice
+        options:
+          - paai_api
+          - celery_worker
+          - celery_beat
+        default: paai_api
+      lines:
+        description: 'Number of log lines to show (most recent)'
+        required: true
+        default: '150'
+
+env:
+  ENVIRONMENT: dev
+
+jobs:
+  view-logs:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Get ssh key
+      run: |
+        echo "${{ secrets.SSH_KEY }}" > ../id_ed25519
+        chmod 600 ../id_ed25519
+
+    - name: Get repo name
+      run: |
+        echo "REPO_NAME=${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/}" >> $GITHUB_ENV
+
+    - name: Get ec2 instance IP
+      run: |
+        PUBLIC_IP=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=${{ env.REPO_NAME }}-${{ env.ENVIRONMENT }}" "Name=instance-state-name,Values=running" \
+          --query "Reservations[0].Instances[0].PublicIpAddress" \
+          --output text)
+
+        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+
+    - name: Fetch logs over SSH
+      run: |
+        ssh -o StrictHostKeyChecking=no -i ../id_ed25519 ubuntu@${{ env.PUBLIC_IP }} << EOF
+        cd ~/${{ env.REPO_NAME }}
+        docker compose logs ${{ inputs.service }} --tail ${{ inputs.lines }}
+        EOF
