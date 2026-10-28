@@ -24,6 +24,14 @@ DEFAULT_TEMPLATE_PATH = (
 # driver/attendant/coach#, times, etc.) is filled in by hand by the crew
 # during the actual transport - none of that data exists in the prior
 # authorization request.
+# ORIGIN/DESTINATION are fixed at a font size that's too large for the
+# field's width to hold a typical full address - long addresses (and
+# their ZIP codes) get silently clipped off the rendered PDF. Setting
+# the font size to 0 ("auto") makes the PDF viewer/renderer shrink the
+# text to fit instead, the same approach the template itself already
+# uses for ORDERED BY.
+AUTO_SIZE_FIELD_NAMES = frozenset({'ORIGIN', 'DESTINATION'})
+
 FIELD_VALUE_GETTERS: dict[str, Callable[[AmbulanceRequest], str]] = {
     'PATIENT NAME': (
         lambda r: f'{r.patient_first_name} {r.patient_last_name}'.strip()
@@ -132,6 +140,8 @@ class CallSheetService:
                         value = getter(request) if getter else None
                     if not value:
                         continue
+                    if widget.field_name in AUTO_SIZE_FIELD_NAMES:
+                        widget.text_fontsize = 0
                     widget.field_value = value
                     widget.update()
                     filled_count += 1
