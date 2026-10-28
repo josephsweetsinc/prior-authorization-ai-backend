@@ -40,6 +40,21 @@ def _read_field_values(pdf_bytes: bytes) -> dict[str, str]:
         doc.close()
 
 
+def _extract_text(pdf_bytes: bytes) -> str:
+    """Extract all rendered text from a filled PDF's bytes.
+
+    Unlike _read_field_values (which reads the stored field value -
+    always the full string regardless of whether it visually fits),
+    this reads what actually gets drawn on the page, which is what
+    catches a field silently clipping part of its text off.
+    """
+    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    try:
+        return ''.join(page.get_text() for page in doc)
+    finally:
+        doc.close()
+
+
 class TestCallSheetService:
     """Test suite for CallSheetService."""
 
@@ -62,6 +77,38 @@ class TestCallSheetService:
         )
         assert values['DATE OF SERVICE'] == '03/15/2026'
         assert values['ORDERED BY'] == 'Dr. Jane Smith'
+
+    def test_generate_does_not_truncate_long_addresses(
+        self, service: CallSheetService
+    ):
+        """Test that a long address isn't silently clipped off the
+        rendered PDF.
+
+        ORIGIN/DESTINATION are narrower than some real addresses at
+        the template's original fixed font size - a prior check found
+        ZIP codes missing from the rendered document even though the
+        full address was stored as the field's value. _read_field_
+        values can't catch this (it always returns the full stored
+        string); only checking the actual rendered text can.
+        """  # noqa: D205
+        long_origin = (
+            '12345 West Industrial Parkway Boulevard, '
+            'Suite 4500, Pittsburgh, PA 15222'
+        )
+        long_destination = (
+            'Allegheny General Hospital Emergency Department, '
+            '320 East North Avenue, Pittsburgh, PA 15212'
+        )
+        request = _make_request(
+            pickup_address=long_origin,
+            destination_address=long_destination,
+        )
+
+        pdf_bytes = service.generate_call_sheet_pdf(request)
+
+        text = _extract_text(pdf_bytes)
+        assert long_origin in text
+        assert long_destination in text
 
     def test_generate_leaves_clinical_fields_blank(
         self, service: CallSheetService
