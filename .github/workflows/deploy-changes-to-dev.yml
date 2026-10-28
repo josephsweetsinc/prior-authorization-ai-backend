@@ -81,4 +81,5 @@ jobs:
         docker compose down
         docker system prune -af && docker builder prune --all --force
         docker compose up -d --build
+        docker compose exec -T paai_api uv run alembic -c models/alembic.ini upgrade head
         EOF
