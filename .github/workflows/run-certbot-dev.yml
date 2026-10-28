@@ -1,0 +1,63 @@
+name: Run certbot on Dev
+
+# One-off manual fix: requests/renews the Dev box's Let's Encrypt cert
+# over SSH, in place, without replacing the instance. Needed because
+# the instance's user_data only runs certbot once, at first boot - if
+# DNS didn't point at the box yet at that moment (e.g. right after an
+# instance replacement picked up a new IP before DNS was updated to
+# match), the cert request fails and nginx ends up not serving
+# anything (it won't start with a missing cert file). Re-running
+# deploy-project.yml doesn't fix this on its own unless something
+# forces another instance replacement - this runs the same certbot
+# command directly instead, once DNS is correctly pointing at the
+# box's current IP.
+
+on:
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: "Domain to request/renew a cert for (must already resolve to the Dev box's current IP)"
+        required: true
+        default: 'dev-api.infopaai.com'
+
+env:
+  ENVIRONMENT: dev
+
+jobs:
+  run-certbot:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Get ssh key
+      run: |
+        echo "${{ secrets.SSH_KEY }}" > ../id_ed25519
+        chmod 600 ../id_ed25519
+
+    - name: Get repo name
+      run: |
+        echo "REPO_NAME=${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/}" >> $GITHUB_ENV
+
+    - name: Get ec2 instance IP
+      run: |
+        PUBLIC_IP=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=${{ env.REPO_NAME }}-${{ env.ENVIRONMENT }}" "Name=instance-state-name,Values=running" \
+          --query "Reservations[0].Instances[0].PublicIpAddress" \
+          --output text)
+
+        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+
+    - name: Request/renew the certificate over SSH
+      run: |
+        ssh -o StrictHostKeyChecking=no -i ../id_ed25519 ubuntu@${{ env.PUBLIC_IP }} << EOF
+        sudo systemctl stop nginx || true
+        sudo certbot certonly --standalone -d ${{ inputs.domain }} --staple-ocsp -m example@gmail.com --agree-tos --non-interactive
+        sudo systemctl start nginx
+        sudo systemctl status nginx --no-pager
+        EOF
