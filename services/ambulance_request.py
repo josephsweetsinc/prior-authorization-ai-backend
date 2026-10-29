@@ -781,6 +781,12 @@ class AmbulanceRequestService(BaseService):
                 + completion_status.missing_documents
             )
             missing_names = ', '.join([item.name for item in missing_items])
+            logger.warning(
+                'Request %s submission rejected - missing required items: '
+                '%s',
+                request.id,
+                missing_names,
+            )
             raise AmbulanceRequestInvalidStatusException(  # noqa: TRY003
                 f'Cannot submit request. Missing required items: '
                 f'{missing_names}.'
