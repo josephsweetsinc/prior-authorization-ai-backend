@@ -1,7 +1,7 @@
 """Pytest configuration and shared fixtures."""
 
 from collections.abc import AsyncGenerator, Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 import pytest_asyncio
@@ -13,8 +13,6 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import StaticPool
 
 from config.database import Base
-from datetime import date, time
-
 from dao import (
     AmbulanceRequestDAO,
     PasswordResetCodeDAO,
@@ -342,6 +340,7 @@ def ambulance_request_factory(
         primary_diagnosis: str | None = 'Chronic heart failure',
         medical_justification: str | None = 'Patient requires transport',
         form_number: str | None = 'CMS-10344',
+        ordering_physician_npi: str | None = '1234567890',
         status: RequestStatus = RequestStatus.DRAFT,
         created_at: datetime | None = None,
     ) -> AmbulanceRequest:
@@ -361,6 +360,10 @@ def ambulance_request_factory(
             primary_diagnosis: Primary diagnosis.
             medical_justification: Medical justification.
             form_number: CMS form number.
+            ordering_physician_npi: Ordering/referring physician's NPI.
+                Defaults to a valid-looking value so existing tests
+                that aren't about this field don't need to care about
+                the completion-status check it feeds.
             status: Request status.
             created_at: Optional custom created_at timestamp.
 
@@ -382,6 +385,7 @@ def ambulance_request_factory(
             primary_diagnosis=primary_diagnosis,
             medical_justification=medical_justification,
             form_number=form_number,
+            ordering_physician_npi=ordering_physician_npi,
             status=status,
         )
         if created_at is not None:

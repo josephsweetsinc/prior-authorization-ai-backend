@@ -1,3 +1,4 @@
+import hmac
 import logging
 from typing import Annotated
 
@@ -76,7 +77,11 @@ async def fax_webhook(
         )
 
     expected_secret = settings.ringcentral_settings.WEBHOOK_SECRET
-    if not expected_secret or token != expected_secret:
+    if (
+        not expected_secret
+        or not token
+        or not hmac.compare_digest(token, expected_secret)
+    ):
         raise FaxWebhookUnauthorizedException
 
     payload = await request.json()
