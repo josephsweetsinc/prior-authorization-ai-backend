@@ -252,19 +252,14 @@ class TestEndToEndWorkflow:
         assert referral_fax.status == FaxStatus.MATCHED
         assert referral_fax.request_id == draft.id
 
-        # --- human reviews: attaches the Verification of Medical
-        # Necessity document the fax itself didn't include as a
-        # separate RequestFile ---
+        # --- human reviews: the fax's own document was already
+        # registered as a RequestFile when the draft was created, so
+        # the Verification of Medical Necessity requirement is already
+        # satisfied - no manual re-upload of the same document needed.
         file_dao = service._file_dao  # noqa: SLF001
-        await file_dao.create(
-            request_id=draft.id,
-            uploaded_by_user_id=reviewing_admin.id,
-            filename='verification-of-medical-necessity.pdf',
-            s3_key='faxes/supporting/verification.pdf',
-            file_size=2048,
-            content_type='application/pdf',
-        )
-        await db_session.commit()
+        draft_files = await file_dao.get_by_request_id(request_id=draft.id)
+        assert len(draft_files) == 1
+        assert draft_files[0].s3_key == referral_fax.s3_key
 
         request_data = CreateAmbulanceRequestSchema(
             request_id=draft.id,
@@ -287,6 +282,7 @@ class TestEndToEndWorkflow:
             ),
             form_number='CMS-13614',
             ordering_physician='Dr. Smith',
+            ordering_physician_npi='1234567890',
         )
 
         # --- human submits (a *different* admin than the draft's
@@ -321,9 +317,9 @@ class TestEndToEndWorkflow:
         )
         assert cover_sheet_filename.startswith('Form13614_')
         assert cover_sheet_content_type == 'application/pdf'
-        # The supporting document attached during review also goes out
-        # with the package - a real, correct package, not just the
-        # cover sheet alone.
+        # The fax's own document (auto-registered as a RequestFile at
+        # draft-creation time) goes out with the package too - a real,
+        # correct package, not just the cover sheet alone.
         assert len(send_fax_kwargs['attachments']) == 2
 
         # The generated cover sheet is a real, live-filled AcroForm

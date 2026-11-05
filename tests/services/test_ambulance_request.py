@@ -334,6 +334,7 @@ class TestAmbulanceRequestService:
             medical_justification='Patient requires transport',
             form_number='CMS-13614',  # This form number indicates Verification of Medical Necessity
             ordering_physician='Dr. Smith',  # Physician Signature is required
+            ordering_physician_npi='1234567890',  # NPI required for Novitas submission
         )
 
         # Get draft request to check ai_accuracy
@@ -455,6 +456,7 @@ class TestAmbulanceRequestService:
             medical_justification='Patient requires transport',
             form_number='CMS-13614',
             ordering_physician='Dr. Smith',
+            ordering_physician_npi='1234567890',
         )
 
         with pytest.raises(AmbulanceRequestInvalidFileIdsException):
@@ -510,6 +512,7 @@ class TestAmbulanceRequestService:
             destination_address='456 Medical Dr',
             form_number='CMS-13614',  # This form number indicates Verification of Medical Necessity
             ordering_physician='Dr. Smith',  # Physician Signature is required
+            ordering_physician_npi='1234567890',  # NPI required for Novitas submission
         )
         created = await service.create_request(
             user=user, request_data=request_data
@@ -583,6 +586,7 @@ class TestAmbulanceRequestService:
             destination_address='456 Medical Dr',
             form_number='CMS-13614',  # This form number indicates Verification of Medical Necessity
             ordering_physician='Dr. Smith',  # Physician Signature is required
+            ordering_physician_npi='1234567890',  # NPI required for Novitas submission
         )
         created = await service.create_request(
             user=user1, request_data=request_data
@@ -638,6 +642,7 @@ class TestAmbulanceRequestService:
             destination_address='456 Medical Dr',
             form_number='CMS-13614',  # This form number indicates Verification of Medical Necessity
             ordering_physician='Dr. Smith',  # Physician Signature is required
+            ordering_physician_npi='1234567890',  # NPI required for Novitas submission
         )
         created = await service.create_request(
             user=user1, request_data=request_data
@@ -698,6 +703,7 @@ class TestAmbulanceRequestService:
                 destination_address='456 Medical Dr',
                 form_number='CMS-13614',  # This form number indicates Verification of Medical Necessity
                 ordering_physician='Dr. Smith',  # Physician Signature is required
+                ordering_physician_npi='1234567890',  # NPI required for Novitas submission
             )
             await service.create_request(
                 user=user1, request_data=request_data
@@ -734,6 +740,7 @@ class TestAmbulanceRequestService:
             destination_address='321 Pine St',
             form_number='CMS-13614',  # This form number indicates Verification of Medical Necessity
             ordering_physician='Dr. Smith',  # Physician Signature is required
+            ordering_physician_npi='1234567890',  # NPI required for Novitas submission
         )
         await service.create_request(
             user=user2, request_data=request_data
@@ -801,6 +808,7 @@ class TestAmbulanceRequestService:
                 destination_address='456 Medical Dr',
                 form_number='CMS-13614',  # This form number indicates Verification of Medical Necessity
                 ordering_physician='Dr. Smith',  # Physician Signature is required
+                ordering_physician_npi='1234567890',  # NPI required for Novitas submission
             )
             await service.create_request(
                 user=user, request_data=request_data
@@ -871,6 +879,7 @@ class TestAmbulanceRequestService:
                 destination_address='456 Medical Dr',
                 form_number='CMS-13614',  # This form number indicates Verification of Medical Necessity
                 ordering_physician='Dr. Smith',  # Physician Signature is required
+                ordering_physician_npi='1234567890',  # NPI required for Novitas submission
             )
             await service.create_request(
                 user=user, request_data=request_data
@@ -949,6 +958,7 @@ class TestAmbulanceRequestService:
             destination_address='456 Medical Dr',
             form_number='CMS-13614',  # This form number indicates Verification of Medical Necessity
             ordering_physician='Dr. Smith',  # Physician Signature is required
+            ordering_physician_npi='1234567890',  # NPI required for Novitas submission
         )
         created = await service.create_request(
             user=user, request_data=request_data
@@ -1278,6 +1288,66 @@ class TestGetCompletionStatus:
         names = {item.name for item in status.missing_fields}
         assert 'Patient ID' in names
         assert status.can_submit is False
+
+    @pytest.mark.asyncio
+    async def test_missing_ordering_physician_npi_blocks_submission(
+        self,
+        service: AmbulanceRequestService,
+        user_factory,
+        ambulance_request_factory,
+    ):
+        """Test that a request with no ordering physician NPI is blocked.
+
+        The AI extractor doesn't always find an NPI on a referral
+        document (fax-originated drafts in particular), and nothing
+        previously caught that before the Novitas Form 13614/CMS-1500
+        were generated with the field silently blank.
+        """
+        user = await user_factory()
+        request = await ambulance_request_factory(
+            user_id=user.id,
+            form_number='CMS-13614',
+            ordering_physician_npi=None,
+        )
+
+        status = await service.get_completion_status(request=request)
+
+        names = {item.name for item in status.missing_fields}
+        assert 'Ordering Physician NPI' in names
+        assert status.can_submit is False
+
+    @pytest.mark.asyncio
+    async def test_present_ordering_physician_npi_is_not_flagged(
+        self,
+        service: AmbulanceRequestService,
+        mock_ai_service,
+        user_factory,
+        ambulance_request_factory,
+        db_session,
+    ):
+        """Test that a real NPI value satisfies the check."""
+        user = await user_factory()
+        request = await ambulance_request_factory(
+            user_id=user.id,
+            form_number='CMS-13614',
+            ordering_physician_npi='1234567890',
+        )
+        file_dao = RequestFileDAO(db_session)
+        await file_dao.create(
+            request_id=request.id,
+            uploaded_by_user_id=user.id,
+            filename='supporting-doc.pdf',
+            s3_key='users/1/supporting-doc.pdf',
+            file_size=1024,
+            content_type='application/pdf',
+        )
+        await db_session.commit()
+
+        status = await service.get_completion_status(request=request)
+
+        names = {item.name for item in status.missing_fields}
+        assert 'Ordering Physician NPI' not in names
+        assert status.can_submit is True
 
 
 class TestGenerateCallSheetPdf:
@@ -1617,6 +1687,89 @@ class TestCreateDraftRequestFromFax:
         assert fax.matched_by_user_id is None
 
     @pytest.mark.asyncio
+    async def test_registers_fax_document_as_request_file(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_success,
+    ):
+        """Test the fax's own document is attached as a RequestFile.
+
+        Without this, create_request_with_extraction's manual-upload
+        drafts have a RequestFile the submission gate can check, but
+        a fax-originated draft had none - the fax's PDF was only ever
+        referenced via IncomingFax.s3_key, which the completion-status
+        document check never looks at. That left every fax-originated
+        draft permanently unable to pass the Verification of Medical
+        Necessity check without someone re-uploading the same document
+        by hand.
+        """
+        admin = await user_factory(
+            email='admin-attach@example.com', role=UserRole.ADMIN
+        )
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-attach',
+            s3_key='faxes/inbound/rc-draft-attach.pdf',
+            content_type='application/pdf',
+            file_size=2048,
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        draft = await service.create_draft_request_from_fax(fax.id)
+
+        file_dao = RequestFileDAO(db_session)
+        files = await file_dao.get_by_request_id(request_id=draft.id)
+
+        assert len(files) == 1
+        assert files[0].s3_key == fax.s3_key
+        assert files[0].file_size == 2048
+        assert files[0].content_type == 'application/pdf'
+        assert files[0].uploaded_by_user_id == admin.id
+
+    @pytest.mark.asyncio
+    async def test_concurrent_processing_does_not_duplicate_draft(
+        self,
+        db_session,
+        user_factory,
+        mock_ai_service_success,
+    ):
+        """Test that reprocessing a claimed fax does not create a 2nd draft.
+
+        Simulates a Celery redelivery racing a still-running first
+        attempt: by the time the second call runs, the fax is no
+        longer RECEIVED (the first call already claimed it), so it
+        must be a no-op rather than creating a second draft request
+        for the same fax.
+        """
+        await user_factory(email='admin-race@example.com', role=UserRole.ADMIN)
+        fax_dao = IncomingFaxDAO(db_session)
+        fax = await fax_dao.create(
+            provider_message_id='rc-draft-race',
+            s3_key='faxes/inbound/rc-draft-race.pdf',
+        )
+        await db_session.commit()
+
+        service = self._make_service(db_session, mock_ai_service_success)
+        first_draft = await service.create_draft_request_from_fax(fax.id)
+        assert first_draft is not None
+
+        # The fax is now MATCHED (not RECEIVED), same as a second
+        # worker picking up a redelivered task after the first already
+        # finished - the end-to-end no-op this guards against. The
+        # narrower TOCTOU race itself (two callers both observing
+        # RECEIVED before either commits) is covered at the DAO level
+        # by TestIncomingFaxDAO.test_claim_from_received_fails_when_not_received.
+        second_draft = await service.create_draft_request_from_fax(fax.id)
+
+        assert second_draft is None
+        from dao import AmbulanceRequestDAO
+
+        request_dao = AmbulanceRequestDAO(db_session)
+        assert await request_dao.count_all(status=RequestStatus.DRAFT) == 1
+
+    @pytest.mark.asyncio
     async def test_uses_configured_fax_intake_admin(
         self,
         db_session,
@@ -1891,6 +2044,7 @@ class TestCreateDraftRequestFromFax:
             medical_justification='Patient requires transport',
             form_number='CMS-13614',
             ordering_physician='Dr. Smith',
+            ordering_physician_npi='1234567890',
         )
 
         result = await service.create_request(

@@ -126,3 +126,56 @@ class TestIncomingFaxDAO:
             fax_id=999999, status=FaxStatus.UNRESOLVED
         )
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_claim_from_received_succeeds_when_received(
+        self, fax_dao, db_session
+    ):
+        """Test that a RECEIVED fax can be claimed and transitioned."""
+        fax = await fax_dao.create(provider_message_id='rc-claim-1')
+        await db_session.commit()
+
+        claimed = await fax_dao.claim_from_received(
+            fax_id=fax.id, new_status=FaxStatus.PROCESSING
+        )
+        await db_session.commit()
+
+        assert claimed is not None
+        assert claimed.status == FaxStatus.PROCESSING
+
+    @pytest.mark.asyncio
+    async def test_claim_from_received_fails_when_not_received(
+        self, fax_dao, db_session
+    ):
+        """Test that a second claim on an already-claimed fax is a no-op.
+
+        Simulates the concurrent-redelivery race this method exists to
+        close: once the first caller's claim has moved the fax off
+        RECEIVED, a second caller trying to claim the same fax_id must
+        get None back, not a second successful transition.
+        """
+        fax = await fax_dao.create(provider_message_id='rc-claim-2')
+        await db_session.commit()
+
+        first = await fax_dao.claim_from_received(
+            fax_id=fax.id, new_status=FaxStatus.PROCESSING
+        )
+        await db_session.commit()
+        assert first is not None
+
+        second = await fax_dao.claim_from_received(
+            fax_id=fax.id, new_status=FaxStatus.PROCESSING
+        )
+        await db_session.commit()
+
+        assert second is None
+        unchanged = await fax_dao.get_by_id(fax.id)
+        assert unchanged.status == FaxStatus.PROCESSING
+
+    @pytest.mark.asyncio
+    async def test_claim_from_received_not_found(self, fax_dao):
+        """Test that claiming a nonexistent fax returns None."""
+        result = await fax_dao.claim_from_received(
+            fax_id=999999, new_status=FaxStatus.PROCESSING
+        )
+        assert result is None

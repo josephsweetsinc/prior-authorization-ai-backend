@@ -1,4 +1,4 @@
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 
 from core.dao import BaseDAO
@@ -190,6 +190,47 @@ class IncomingFaxDAO(BaseDAO):
         await self._session.flush()
         await self._session.refresh(fax)
         return fax
+
+    async def claim_from_received(
+        self,
+        *,
+        fax_id: int,
+        new_status: FaxStatus,
+    ) -> IncomingFax | None:
+        """Atomically move a fax out of RECEIVED, claiming it for processing.
+
+        Combines the "is this still RECEIVED" check and the status
+        transition into a single conditional UPDATE, so two concurrent
+        callers for the same fax_id (e.g. a Celery task redelivered by
+        the broker while the first attempt is still running) can't both
+        observe RECEIVED and both proceed - the UPDATE's WHERE clause
+        only matches, and only commits a row change, for whichever
+        caller gets there first.
+
+        Args:
+            fax_id: ID of the fax to claim.
+            new_status: Status to transition to (e.g. PROCESSING, or
+                UNRESOLVED for faxes held for manual review).
+
+        Returns:
+            IncomingFax | None: The updated fax if this call won the
+                claim, or None if the fax was not at RECEIVED (already
+                claimed by a concurrent call, or not found).
+
+        """
+        stmt = (
+            update(IncomingFax)
+            .where(
+                IncomingFax.id == fax_id,
+                IncomingFax.status == FaxStatus.RECEIVED,
+            )
+            .values(status=new_status)
+        )
+        result = await self._session.execute(stmt)
+        if result.rowcount == 0:
+            return None
+        await self._session.flush()
+        return await self.get_by_id(fax_id)
 
     async def link_to_request(
         self,

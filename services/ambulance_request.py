@@ -116,6 +116,21 @@ def _normalize_fax_number(number: str | None) -> str:
     return digits
 
 
+def _fax_file_extension(content_type: str | None) -> str:
+    """Map a fax's stored content type to a filename extension.
+
+    Args:
+        content_type: MIME type recorded on the IncomingFax row.
+
+    Returns:
+        str: '.pdf' for PDFs, '.tiff' otherwise - matching how
+            FaxService.process_inbound_message picks the extension
+            when it first stores the fax in S3.
+
+    """
+    return '.pdf' if content_type == 'application/pdf' else '.tiff'
+
+
 class AmbulanceRequestService(BaseService):
     """Service for ambulance request operations."""
 
@@ -591,19 +606,39 @@ class AmbulanceRequestService(BaseService):
                 fax_id,
                 fax.from_number,
             )
-            await self._incoming_fax_dao.update_status(
-                fax_id=fax_id, status=FaxStatus.UNRESOLVED
+            claimed = await self._incoming_fax_dao.claim_from_received(
+                fax_id=fax_id, new_status=FaxStatus.UNRESOLVED
             )
-            await self._session.commit()
+            if claimed:
+                await self._session.commit()
+            else:
+                await self._session.rollback()
             return None
 
         # Checkpoint the PROCESSING transition immediately so the fax
         # doesn't sit at RECEIVED (and look un-picked-up) while the AI
-        # extraction call, which can take a while, is in flight.
-        await self._incoming_fax_dao.update_status(
-            fax_id=fax_id, status=FaxStatus.PROCESSING
+        # extraction call, which can take a while, is in flight. This is
+        # also the concurrency guard: claim_from_received only succeeds
+        # for one caller if this fax is picked up twice (e.g. a Celery
+        # redelivery racing the still-running first attempt), so only
+        # one draft request is ever created for a given fax.
+        claimed_fax = await self._incoming_fax_dao.claim_from_received(
+            fax_id=fax_id, new_status=FaxStatus.PROCESSING
         )
+        if not claimed_fax:
+            logger.info(
+                'Fax %s was already claimed for processing by a '
+                'concurrent call; skipping',
+                fax_id,
+            )
+            await self._session.rollback()
+            return None
         await self._session.commit()
+        fax = claimed_fax
+        # s3_key was already confirmed non-empty by the eligibility
+        # check above; claiming doesn't touch it, but it's a fresh
+        # row fetch mypy can't narrow through.
+        assert fax.s3_key  # noqa: S101
 
         owning_user = await self._resolve_fax_intake_admin()
         if not owning_user:
@@ -650,6 +685,22 @@ class AmbulanceRequestService(BaseService):
                 request_id=draft_request.id,
                 matched_by_user_id=None,
             )
+            # The fax's own document is the patient's referral paperwork
+            # and typically the only evidence of medical necessity this
+            # draft has - register it as a RequestFile so the submission
+            # gate's document check (which only looks at RequestFile rows,
+            # not at IncomingFax) can actually find it, instead of
+            # requiring someone to re-upload the same fax by hand before
+            # the request can ever be submitted.
+            await self._file_dao.create(
+                request_id=draft_request.id,
+                uploaded_by_user_id=owning_user.id,
+                filename=f'fax-{fax_id}{_fax_file_extension(fax.content_type)}',
+                s3_key=fax.s3_key,
+                file_size=fax.file_size or 0,
+                content_type=fax.content_type or 'application/pdf',
+            )
+            await self._session.flush()
             await self._session.refresh(draft_request)
         except Exception:
             # PROCESSING was already committed above so the fax doesn't
@@ -1346,6 +1397,27 @@ class AmbulanceRequestService(BaseService):
             required_fields.append(
                 CompletionStatusItem(
                     name='Destination Address',
+                    status=CompletionStatus.COMPLETE,
+                )
+            )
+
+        if not request.ordering_physician_npi:
+            required_fields.append(
+                CompletionStatusItem(
+                    name='Ordering Physician NPI',
+                    status=CompletionStatus.MISSING,
+                    message=(
+                        "The ordering/referring physician's NPI is "
+                        'required for the Novitas Form 13614 and CMS-1500 '
+                        '(the AI extractor may not find it on every '
+                        'referral document - it can be entered manually)'
+                    ),
+                )
+            )
+        else:
+            required_fields.append(
+                CompletionStatusItem(
+                    name='Ordering Physician NPI',
                     status=CompletionStatus.COMPLETE,
                 )
             )
