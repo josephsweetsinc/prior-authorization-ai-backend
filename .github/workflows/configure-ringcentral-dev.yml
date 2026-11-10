@@ -1,0 +1,108 @@
+name: Configure RingCentral settings on Dev
+
+# One-off setup tool: writes the RINGCENTRAL_* settings into the Dev
+# box's live .env (in place, via sed/grep - never printed) and
+# recreates the affected containers so they pick the values up.
+#
+# Deliberately does NOT touch secrets.ENV (the GitHub secret
+# deploy-changes-to-dev.yml writes .env from on every deploy), because
+# secrets.ENV is write-only - there is no safe way for a workflow to
+# read its current value, merge in new keys, and write it back without
+# printing the whole thing (including every other secret already in
+# it) to the run's log. Until secrets.ENV is separately updated with
+# these same lines (by hand, from each value's own source - RingCentral
+# console, etc.), a future push to main will overwrite .env from
+# secrets.ENV and silently drop everything this workflow just set.
+#
+# The RingCentral app credentials (Client ID/Secret/JWT) and the
+# webhook shared secret are read from their own repo secrets rather
+# than typed into this workflow's inputs, since workflow_dispatch
+# inputs are NOT masked and would otherwise show up in plain text in
+# the Actions UI. The fax numbers and admin email aren't sensitive the
+# same way, so those stay as plain inputs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      fax_number:
+        description: 'RINGCENTRAL_FAX_NUMBER (E.164, e.g. +15551234567)'
+        required: true
+      novitas_fax_number:
+        description: 'RINGCENTRAL_NOVITAS_FAX_NUMBER (E.164)'
+        required: true
+      fax_intake_admin_email:
+        description: 'RINGCENTRAL_FAX_INTAKE_ADMIN_EMAIL'
+        required: true
+
+env:
+  ENVIRONMENT: dev
+
+jobs:
+  configure:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Get ssh key
+      run: |
+        echo "${{ secrets.SSH_KEY }}" > ../id_ed25519
+        chmod 600 ../id_ed25519
+
+    - name: Get repo name
+      run: |
+        echo "REPO_NAME=${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/}" >> $GITHUB_ENV
+
+    - name: Get ec2 instance IP
+      run: |
+        PUBLIC_IP=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=${{ env.REPO_NAME }}-${{ env.ENVIRONMENT }}" "Name=instance-state-name,Values=running" \
+          --query "Reservations[0].Instances[0].PublicIpAddress" \
+          --output text)
+
+        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+
+    - name: Upsert RingCentral settings and restart affected containers
+      env:
+        RC_CLIENT_ID: ${{ secrets.RINGCENTRAL_CLIENT_ID }}
+        RC_CLIENT_SECRET: ${{ secrets.RINGCENTRAL_CLIENT_SECRET }}
+        RC_JWT: ${{ secrets.RINGCENTRAL_JWT }}
+        RC_WEBHOOK_SECRET: ${{ secrets.RINGCENTRAL_WEBHOOK_SECRET }}
+        RC_FAX_NUMBER: ${{ inputs.fax_number }}
+        RC_NOVITAS_FAX_NUMBER: ${{ inputs.novitas_fax_number }}
+        RC_FAX_INTAKE_ADMIN_EMAIL: ${{ inputs.fax_intake_admin_email }}
+      run: |
+        set -euo pipefail
+        ssh -o StrictHostKeyChecking=no -i ../id_ed25519 \
+          ubuntu@${{ env.PUBLIC_IP }} \
+          "cd ~/${{ env.REPO_NAME }} && \
+           cp .env .env.bak.\$(date +%s) && \
+           upsert() { \
+             key=\$1; value=\$2; \
+             if grep -q \"^\${key}=\" .env; then \
+               sed -i \"s|^\${key}=.*|\${key}=\${value}|\" .env; \
+             else \
+               echo \"\${key}=\${value}\" >> .env; \
+             fi; \
+           }; \
+           upsert RINGCENTRAL_CLIENT_ID '$RC_CLIENT_ID'; \
+           upsert RINGCENTRAL_CLIENT_SECRET '$RC_CLIENT_SECRET'; \
+           upsert RINGCENTRAL_JWT '$RC_JWT'; \
+           upsert RINGCENTRAL_SERVER_URL 'https://platform.ringcentral.com'; \
+           upsert RINGCENTRAL_FAX_NUMBER '$RC_FAX_NUMBER'; \
+           upsert RINGCENTRAL_NOVITAS_FAX_NUMBER '$RC_NOVITAS_FAX_NUMBER'; \
+           upsert RINGCENTRAL_FAX_INTAKE_ADMIN_EMAIL '$RC_FAX_INTAKE_ADMIN_EMAIL'; \
+           upsert RINGCENTRAL_WEBHOOK_SECRET '$RC_WEBHOOK_SECRET'; \
+           docker compose up -d --force-recreate paai_api celery_worker celery_beat"
+
+    - name: Confirm containers restarted cleanly
+      run: |
+        ssh -o StrictHostKeyChecking=no -i ../id_ed25519 ubuntu@${{ env.PUBLIC_IP }} << EOF
+        cd ~/${{ env.REPO_NAME }}
+        docker compose ps
+        EOF
