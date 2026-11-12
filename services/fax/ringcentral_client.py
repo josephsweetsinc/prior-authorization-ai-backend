@@ -22,6 +22,7 @@ from exceptions import FaxProviderException
 logger = logging.getLogger(__name__)
 
 TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS = 60
+SUBSCRIPTION_EXPIRES_IN_SECONDS = 7_776_000  # 90 days
 
 
 class RingCentralClient:
@@ -254,6 +255,72 @@ class RingCentralClient:
             logger.exception('RingCentral outbound fax send failed')
             raise FaxProviderException(  # noqa: TRY003
                 f'Failed to send fax via RingCentral: {exc}'
+            ) from exc
+
+        result: dict[str, Any] = response.json()
+        return result
+
+    async def create_subscription(
+        self,
+        *,
+        webhook_url: str,
+        event_filters: list[str] | None = None,
+        expires_in: int = SUBSCRIPTION_EXPIRES_IN_SECONDS,
+    ) -> dict[str, Any]:
+        """Register a webhook subscription for inbound fax notifications.
+
+        One-time (or renewal) setup call - there is no UI for this on
+        RingCentral's side, only this API. RingCentral sends a
+        validation request to webhook_url as part of creating the
+        subscription, which the receiving endpoint must answer by
+        echoing back the Validation-Token header (see fax_webhook in
+        endpoints/fax.py).
+
+        Args:
+            webhook_url: Full URL (including the shared-secret query
+                parameter) RingCentral should POST fax notifications to.
+            event_filters: RingCentral event filter paths to subscribe
+                to. Defaults to inbound fax notifications only.
+            expires_in: Subscription lifetime in seconds. RingCentral
+                documents a 7-day/90-day cap depending on delivery
+                mode for some resources, but allows much longer for
+                WebHook delivery specifically; the default here is the
+                safely-documented 90-day figure. The subscription must
+                be renewed (call this again, or RingCentral's renew
+                endpoint) before it expires, or notifications silently
+                stop.
+
+        Returns:
+            dict: The created subscription resource (includes its id,
+                status, and expirationTime).
+
+        Raises:
+            FaxProviderException: If the request fails.
+
+        """
+        token = await self._get_access_token()
+        payload = {
+            'eventFilters': event_filters
+            or [
+                '/restapi/v1.0/account/~/extension/~/fax?direction=Inbound',
+            ],
+            'deliveryMode': {
+                'transportType': 'WebHook',
+                'address': webhook_url,
+            },
+            'expiresIn': expires_in,
+        }
+        try:
+            response = await self._http_client.post(
+                '/restapi/v1.0/subscription',
+                headers={'Authorization': f'Bearer {token}'},
+                json=payload,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.exception('Failed to create RingCentral subscription')
+            raise FaxProviderException(  # noqa: TRY003
+                f'Failed to create RingCentral subscription: {exc}'
             ) from exc
 
         result: dict[str, Any] = response.json()
