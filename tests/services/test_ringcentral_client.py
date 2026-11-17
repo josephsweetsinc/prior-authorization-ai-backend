@@ -106,3 +106,70 @@ class TestSendFax:
             )
 
         await client.aclose()
+
+
+class TestCreateSubscription:
+    """Test suite for RingCentralClient.create_subscription()."""
+
+    @pytest.mark.asyncio
+    async def test_create_subscription_success(self):
+        """Test that it posts the expected webhook subscription body."""
+        captured: dict[str, httpx.Request] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == '/restapi/oauth/token':
+                return _token_response(request)
+            captured['subscription_request'] = request
+            return httpx.Response(
+                200,
+                json={
+                    'id': 'sub-1',
+                    'status': 'Active',
+                    'expirationTime': '2027-01-01T00:00:00.000Z',
+                },
+            )
+
+        client = _make_client(handler)
+
+        result = await client.create_subscription(
+            webhook_url='https://dev-api.infopaai.com/api/v1/fax/webhook'
+            '?token=shh',
+        )
+
+        assert result == {
+            'id': 'sub-1',
+            'status': 'Active',
+            'expirationTime': '2027-01-01T00:00:00.000Z',
+        }
+        request = captured['subscription_request']
+        assert request.url.path == '/restapi/v1.0/subscription'
+        body = request.content.decode('utf-8')
+        assert (
+            '/restapi/v1.0/account/~/extension/~/fax?direction=Inbound'
+            in body
+        )
+        assert 'WebHook' in body
+        assert (
+            'https://dev-api.infopaai.com/api/v1/fax/webhook?token=shh'
+            in body
+        )
+
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_create_subscription_raises_on_http_error(self):
+        """Test that a failed subscription request raises."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == '/restapi/oauth/token':
+                return _token_response(request)
+            return httpx.Response(400, json={'error': 'bad request'})
+
+        client = _make_client(handler)
+
+        with pytest.raises(FaxProviderException):
+            await client.create_subscription(
+                webhook_url='https://dev-api.infopaai.com/api/v1/fax/webhook',
+            )
+
+        await client.aclose()
