@@ -1,0 +1,57 @@
+name: Create/renew Dev fax webhook subscription
+
+# Manual tool: registers (or renews) the inbound-fax webhook
+# subscription with RingCentral by running
+# scripts/create_fax_subscription.py inside the Dev container over
+# SSH. There's no RingCentral console setting for this - it only
+# exists as an API call - so this has to be run once to start fax
+# notifications flowing, and again whenever the subscription is about
+# to expire (it does not renew itself).
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: 'Backend base URL (no trailing slash)'
+        required: true
+        default: 'https://dev-api.infopaai.com'
+
+env:
+  ENVIRONMENT: dev
+
+jobs:
+  create-subscription:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Get ssh key
+      run: |
+        echo "${{ secrets.SSH_KEY }}" > ../id_ed25519
+        chmod 600 ../id_ed25519
+
+    - name: Get repo name
+      run: |
+        echo "REPO_NAME=${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/}" >> $GITHUB_ENV
+
+    - name: Get ec2 instance IP
+      run: |
+        PUBLIC_IP=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=${{ env.REPO_NAME }}-${{ env.ENVIRONMENT }}" "Name=instance-state-name,Values=running" \
+          --query "Reservations[0].Instances[0].PublicIpAddress" \
+          --output text)
+
+        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+
+    - name: Create fax subscription
+      run: |
+        ssh -o StrictHostKeyChecking=no -i ../id_ed25519 ubuntu@${{ env.PUBLIC_IP }} << EOF
+        cd ~/${{ env.REPO_NAME }}
+        docker compose exec -T paai_api uv run python scripts/create_fax_subscription.py "${{ inputs.base_url }}"
+        EOF
