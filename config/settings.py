@@ -7,6 +7,7 @@ application configuration from environment variables and .env files.
 import os
 from functools import cache
 from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -23,6 +24,40 @@ match env_mode:
     case 'dev':
         env_file = BASE_DIR / '.env.dev'
 """Path to environment-specific .env file."""
+
+
+def _normalize_db_url_for_asyncpg(url: str) -> str:
+    """Strip libpq-only query parameters asyncpg's connect() rejects.
+
+    Connection strings copied from a provider's own dashboard (e.g.
+    Neon's "Connect" dialog) are written for libpq-based drivers
+    (psycopg2 etc.) and commonly include sslmode/channel_binding.
+    asyncpg's connect() doesn't ignore unknown kwargs built from these -
+    it raises TypeError outright. sslmode is translated to the `ssl`
+    parameter asyncpg does understand (so SSL enforcement isn't
+    silently dropped); channel_binding has no asyncpg equivalent and is
+    just removed.
+
+    Args:
+        url: Raw connection URL, as provided.
+
+    Returns:
+        str: The URL with incompatible query parameters translated or
+            removed. Returned unchanged if it has no query string.
+
+    """
+    parts = urlsplit(url)
+    if not parts.query:
+        return url
+
+    params = parse_qs(parts.query, keep_blank_values=True)
+    sslmode = params.pop('sslmode', [None])[0]
+    params.pop('channel_binding', None)
+    if sslmode and 'ssl' not in params:
+        params['ssl'] = [sslmode]
+
+    new_query = urlencode(params, doseq=True)
+    return urlunsplit(parts._replace(query=new_query))
 
 
 class TokenSettings(BaseSettings):
@@ -85,21 +120,22 @@ class DatabaseSettings(BaseSettings):
             SSL query parameter string if SSL is enabled, or empty string.
 
         """
-        return '?sslmode=require' if self.SSL else ''
+        return '?ssl=require' if self.SSL else ''
 
     def url(self) -> str:
         """Generate database connection URL.
 
-        If URL is provided directly, returns it. Otherwise, constructs
-        the URL from individual connection parameters.
+        If URL is provided directly, returns it (after normalizing it
+        for asyncpg - see _normalize_db_url_for_asyncpg). Otherwise,
+        constructs the URL from individual connection parameters.
 
         Returns:
             Database connection URL string.
 
         """
         if self.URL:
-            return self.URL
-        return f'postgresql+asyncpg://{self.USER}:{self.PASSWORD}@{self.HOST}:{self.PORT}/{self.DB_NAME}{self._ssl}'
+            return _normalize_db_url_for_asyncpg(self.URL)
+        return f'postgresql+asyncpg://{self.USER}:{self.PASSWORD}@{self.HOST}:{self.PORT}/{self.DB_NAME}{self._ssl()}'
 
 
 class LoggingSettings(BaseSettings):
