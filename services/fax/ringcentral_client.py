@@ -167,6 +167,36 @@ class RingCentralClient:
         result: dict[str, Any] = response.json()
         return result
 
+    async def list_inbound_fax_messages(
+        self,
+        *,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """List recent inbound fax messages, newest first.
+
+        Diagnostic/recovery tool: lets a fax already sitting in
+        RingCentral's own message store be found and processed
+        directly, bypassing the webhook entirely - useful when a
+        webhook notification was missed or not recognized as a new fax
+        (e.g. an unexpected payload shape), since the fax itself is
+        still safely held by RingCentral regardless.
+
+        Args:
+            limit: Maximum number of messages to return.
+
+        Returns:
+            list[dict]: Message-store records, each as returned by
+                RingCentral (same shape as get_message()'s result).
+
+        """
+        response = await self._authenticated_get(
+            '/restapi/v1.0/account/~/extension/~/message-store'
+            f'?messageType=Fax&direction=Inbound&perPage={limit}',
+        )
+        result: dict[str, Any] = response.json()
+        records: list[dict[str, Any]] = result.get('records', [])
+        return records
+
     @staticmethod
     def get_document_attachment(
         message: dict[str, Any],
