@@ -1,0 +1,61 @@
+name: Recover missed fax on Dev
+
+# Manual recovery tool: runs scripts/recover_missed_fax.py inside the
+# Dev paai_api container over SSH, either to list recent inbound fax
+# messages RingCentral has on file, or to process one of them directly
+# (bypassing the webhook) into a draft ambulance request.
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: 'list (see recent faxes) or process (process one)'
+        required: true
+        type: choice
+        options:
+          - list
+          - process
+        default: list
+      message_id:
+        description: 'RingCentral message ID (only needed for "process")'
+        required: false
+
+env:
+  ENVIRONMENT: dev
+
+jobs:
+  recover-fax:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Get ssh key
+      run: |
+        echo "${{ secrets.SSH_KEY }}" > ../id_ed25519
+        chmod 600 ../id_ed25519
+
+    - name: Get repo name
+      run: |
+        echo "REPO_NAME=${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/}" >> $GITHUB_ENV
+
+    - name: Get ec2 instance IP
+      run: |
+        PUBLIC_IP=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=${{ env.REPO_NAME }}-${{ env.ENVIRONMENT }}" "Name=instance-state-name,Values=running" \
+          --query "Reservations[0].Instances[0].PublicIpAddress" \
+          --output text)
+
+        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+
+    - name: Run recovery script
+      run: |
+        ssh -o StrictHostKeyChecking=no -i ../id_ed25519 ubuntu@${{ env.PUBLIC_IP }} << EOF
+        cd ~/${{ env.REPO_NAME }}
+        docker compose exec -T paai_api uv run python scripts/recover_missed_fax.py ${{ inputs.command }} ${{ inputs.message_id }}
+        EOF
