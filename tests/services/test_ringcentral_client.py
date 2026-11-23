@@ -173,3 +173,53 @@ class TestCreateSubscription:
             )
 
         await client.aclose()
+
+
+class TestListInboundFaxMessages:
+    """Test suite for RingCentralClient.list_inbound_fax_messages()."""
+
+    @pytest.mark.asyncio
+    async def test_returns_records_from_response(self):
+        """Test that records are returned and the request is well-formed."""
+        captured: dict[str, httpx.Request] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == '/restapi/oauth/token':
+                return _token_response(request)
+            captured['list_request'] = request
+            return httpx.Response(
+                200,
+                json={'records': [{'id': '1'}, {'id': '2'}]},
+            )
+
+        client = _make_client(handler)
+
+        result = await client.list_inbound_fax_messages()
+
+        assert result == [{'id': '1'}, {'id': '2'}]
+        request = captured['list_request']
+        assert (
+            request.url.path
+            == '/restapi/v1.0/account/~/extension/~/message-store'
+        )
+        assert request.url.params['messageType'] == 'Fax'
+        assert request.url.params['direction'] == 'Inbound'
+
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_list_when_no_records_key(self):
+        """Test that a response with no records key yields an empty list."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == '/restapi/oauth/token':
+                return _token_response(request)
+            return httpx.Response(200, json={})
+
+        client = _make_client(handler)
+
+        result = await client.list_inbound_fax_messages()
+
+        assert result == []
+
+        await client.aclose()

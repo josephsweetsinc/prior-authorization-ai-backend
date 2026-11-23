@@ -105,7 +105,17 @@ class FaxService(BaseService):
         """
         message_ids = extract_fax_message_ids(payload)
         if not message_ids:
-            logger.info('Fax webhook payload had no new fax message IDs')
+            # Logged at warning (not info) with the raw body: this fires
+            # on every non-fax account event too (SMS, voicemail, the
+            # subscription's own renewal ping), but it's also the only
+            # evidence available if extract_fax_message_ids' assumptions
+            # about the payload shape ever turn out wrong for a real
+            # fax notification - there's no other way to tell those two
+            # cases apart after the fact.
+            logger.warning(
+                'Fax webhook payload had no new fax message IDs: %s',
+                payload,
+            )
             return []
 
         results: list[IncomingFax] = []
