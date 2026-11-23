@@ -25,6 +25,27 @@ TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS = 60
 SUBSCRIPTION_EXPIRES_IN_SECONDS = 7_776_000  # 90 days
 
 
+def _error_detail(exc: httpx.HTTPError) -> str:
+    """Extract the response body from an HTTP error, if there is one.
+
+    httpx.HTTPStatusError carries the actual response, which for a
+    RingCentral 4xx/5xx is almost always a JSON body naming the real
+    errorCode/message - the generic "400 Bad Request" text alone isn't
+    enough to tell e.g. a malformed number from a disabled feature from
+    an unverified account. Other httpx.HTTPError subtypes (connection
+    failures, timeouts) carry no response at all.
+
+    Args:
+        exc: The httpx error raised by the failed request.
+
+    Returns:
+        str: The response body text, or an empty string if there is none.
+
+    """
+    response = getattr(exc, 'response', None)
+    return response.text if response is not None else ''
+
+
 class RingCentralClient:
     """Client for RingCentral's fax-related REST API endpoints."""
 
@@ -85,9 +106,10 @@ class RingCentralClient:
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            logger.exception('RingCentral token request failed')
+            detail = _error_detail(exc)
+            logger.exception('RingCentral token request failed: %s', detail)
             raise FaxProviderException(  # noqa: TRY003
-                f'Failed to authenticate with RingCentral: {exc}'
+                f'Failed to authenticate with RingCentral: {exc} ({detail})'
             ) from exc
 
         payload = response.json()
@@ -119,9 +141,12 @@ class RingCentralClient:
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            logger.exception('RingCentral API request failed: %s', url)
+            detail = _error_detail(exc)
+            logger.exception(
+                'RingCentral API request failed: %s (%s)', url, detail
+            )
             raise FaxProviderException(  # noqa: TRY003
-                f'RingCentral API request failed: {exc}'
+                f'RingCentral API request failed: {exc} ({detail})'
             ) from exc
         return response
 
@@ -252,9 +277,12 @@ class RingCentralClient:
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            logger.exception('RingCentral outbound fax send failed')
+            detail = _error_detail(exc)
+            logger.exception(
+                'RingCentral outbound fax send failed: %s', detail
+            )
             raise FaxProviderException(  # noqa: TRY003
-                f'Failed to send fax via RingCentral: {exc}'
+                f'Failed to send fax via RingCentral: {exc} ({detail})'
             ) from exc
 
         result: dict[str, Any] = response.json()
@@ -318,9 +346,12 @@ class RingCentralClient:
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            logger.exception('Failed to create RingCentral subscription')
+            detail = _error_detail(exc)
+            logger.exception(
+                'Failed to create RingCentral subscription: %s', detail
+            )
             raise FaxProviderException(  # noqa: TRY003
-                f'Failed to create RingCentral subscription: {exc}'
+                f'Failed to create RingCentral subscription: {exc} ({detail})'
             ) from exc
 
         result: dict[str, Any] = response.json()
