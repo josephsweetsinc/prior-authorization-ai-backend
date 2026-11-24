@@ -53,9 +53,9 @@ jobs:
         echo "--- docker compose ps ---"
         docker compose ps
         echo "--- paai_api's REDIS_URL env var ---"
-        docker compose exec -T paai_api printenv REDIS_URL
+        docker compose exec -T paai_api printenv REDIS_URL < /dev/null
         echo "--- DNS resolution of 'redis' from inside paai_api ---"
-        docker compose exec -T paai_api getent hosts redis || echo "getent failed"
+        docker compose exec -T paai_api getent hosts redis < /dev/null || echo "getent failed"
         echo "--- TCP connect test from paai_api to redis:6379 ---"
         docker compose exec -T paai_api python3 -c "
         import socket
@@ -65,7 +65,7 @@ jobs:
             s.close()
         except Exception as e:
             print('FAILED:', repr(e))
-        "
+        " < /dev/null
         echo "--- redis container's own logs (last 20 lines) ---"
         docker compose logs redis --tail 20
         EOF
