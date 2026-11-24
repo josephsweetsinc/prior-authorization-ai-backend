@@ -1,0 +1,71 @@
+name: Diagnose Redis connectivity on Dev
+
+# Manual, read-only diagnostic tool: checks whether paai_api can
+# actually reach the redis container right now - container status,
+# the REDIS_URL paai_api sees at runtime, and a live TCP connection
+# attempt from inside paai_api to redis:6379. Added to debug a
+# recurring "Connection refused" error from paai_api's Celery
+# producer side, despite compose.yml correctly setting REDIS_URL and
+# both containers starting up cleanly.
+#
+# Makes no changes to anything - safe to run any time.
+
+on:
+  workflow_dispatch:
+
+env:
+  ENVIRONMENT: dev
+
+jobs:
+  diagnose-redis:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Get ssh key
+      run: |
+        echo "${{ secrets.SSH_KEY }}" > ../id_ed25519
+        chmod 600 ../id_ed25519
+
+    - name: Get repo name
+      run: |
+        echo "REPO_NAME=${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/}" >> $GITHUB_ENV
+
+    - name: Get ec2 instance IP
+      run: |
+        PUBLIC_IP=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=${{ env.REPO_NAME }}-${{ env.ENVIRONMENT }}" "Name=instance-state-name,Values=running" \
+          --query "Reservations[0].Instances[0].PublicIpAddress" \
+          --output text)
+
+        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+
+    - name: Check Redis connectivity from paai_api
+      run: |
+        ssh -o StrictHostKeyChecking=no -i ../id_ed25519 ubuntu@${{ env.PUBLIC_IP }} << 'EOF'
+        cd ~/prior-authorization-ai-backend
+        echo "--- docker compose ps ---"
+        docker compose ps
+        echo "--- paai_api's REDIS_URL env var ---"
+        docker compose exec -T paai_api printenv REDIS_URL
+        echo "--- DNS resolution of 'redis' from inside paai_api ---"
+        docker compose exec -T paai_api getent hosts redis || echo "getent failed"
+        echo "--- TCP connect test from paai_api to redis:6379 ---"
+        docker compose exec -T paai_api python3 -c "
+        import socket
+        try:
+            s = socket.create_connection(('redis', 6379), timeout=3)
+            print('CONNECTED')
+            s.close()
+        except Exception as e:
+            print('FAILED:', repr(e))
+        "
+        echo "--- redis container's own logs (last 20 lines) ---"
+        docker compose logs redis --tail 20
+        EOF
