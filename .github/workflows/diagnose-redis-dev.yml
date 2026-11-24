@@ -68,4 +68,16 @@ jobs:
         " < /dev/null
         echo "--- redis container's own logs (last 20 lines) ---"
         docker compose logs redis --tail 20
+        echo "--- host git HEAD ---"
+        git log -1 --oneline
+        echo "--- config/celery.py on host, does it have the new log line? ---"
+        grep -n "resolved to" config/celery.py || echo "NOT FOUND on host"
+        echo "--- config/celery.py as paai_api sees it ---"
+        docker compose exec -T paai_api grep -n "resolved to" config/celery.py < /dev/null || echo "NOT FOUND in container"
+        echo "--- stale __pycache__ check for config/celery ---"
+        find __pycache__ -iname "celery*" -exec ls -la {} \; 2>/dev/null || echo "no top-level __pycache__/celery* match"
+        find config/__pycache__ -iname "celery*" -exec ls -la {} \; 2>/dev/null || echo "no config/__pycache__/celery* match"
+        ls -la config/celery.py
+        echo "--- fresh process broker_url resolution, right now ---"
+        docker compose exec -T paai_api uv run python -c "from config.celery import celery_app; print('BROKER:', celery_app.conf.broker_url)" < /dev/null
         EOF
