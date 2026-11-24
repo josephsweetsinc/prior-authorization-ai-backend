@@ -41,6 +41,7 @@ def create_celery_app() -> Celery:
 
     """
     redis_url = get_redis_url()
+    logger.info('Celery broker/backend URL resolved to: %s', redis_url)
     celery_app = Celery(
         'paai',
         broker=redis_url,
