@@ -1,0 +1,21 @@
+# Secrets - never commit real environment files. .env.example is the
+# only one meant to be tracked; it contains placeholders only.
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.DS_Store
+.vscode/
+.idea/
