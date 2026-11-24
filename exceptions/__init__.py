@@ -15,6 +15,7 @@ from .auth import (
     AccessTokenExpiredException,
     NoFiltersException,
     NoUpdateDataException,
+    RateLimitExceededException,
     RefreshTokenException,
     WrongCredentialsException,
 )
@@ -69,6 +70,7 @@ __all__ = [
     'NotificationMissingRequestException',
     'NotificationNotFoundException',
     'NotificationSystemCategoryException',
+    'RateLimitExceededException',
     'RefreshTokenException',
     'ResetCodeExpiredException',
     'ResetCodeUsedException',

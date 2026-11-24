@@ -79,3 +79,20 @@ class NoFiltersException(AuthorizationException):
             status_code=400,
             detail='No filters provided for operation',
         )
+
+
+class RateLimitExceededException(AuthorizationException):
+    """Raised when a client exceeds a per-IP rate limit.
+
+    Attributes:
+        status_code (int): HTTP status code for exception (429).
+        detail (str): Human-readable explanation of the error.
+
+    """
+
+    def __init__(self) -> None:
+        """Initialize RateLimitExceededException with a default message."""
+        super().__init__(
+            status_code=429,
+            detail='Too many attempts. Please try again later.',
+        )
