@@ -1,0 +1,72 @@
+name: Set up fail2ban on Dev
+
+# One-off/idempotent setup tool: installs and enables fail2ban's sshd
+# jail on the already-running Dev box. Port 22 has to stay open to
+# 0.0.0.0/0 (both for admin SSH access and because this project's own
+# GitHub Actions deploy workflows connect from GitHub's shared,
+# non-fixed runner IP ranges, so it can't be restricted to a single
+# allowed source instead) - this auto-blocks any IP that repeatedly
+# fails to log in, without affecting those workflows, which log in
+# correctly on the first try every time.
+#
+# New instances get this automatically via terraform/modules/ec2's
+# user_data, but that only runs at instance creation, not
+# retroactively - this workflow is what actually applies it to the
+# Dev box that's already running. Safe to re-run any time (installing
+# an already-installed package and overwriting the same config file
+# are both no-ops).
+
+on:
+  workflow_dispatch:
+
+env:
+  ENVIRONMENT: dev
+
+jobs:
+  setup-fail2ban:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Get ssh key
+      run: |
+        echo "${{ secrets.SSH_KEY }}" > ../id_ed25519
+        chmod 600 ../id_ed25519
+
+    - name: Get repo name
+      run: |
+        echo "REPO_NAME=${GITHUB_REPOSITORY#$GITHUB_REPOSITORY_OWNER/}" >> $GITHUB_ENV
+
+    - name: Get ec2 instance IP
+      run: |
+        PUBLIC_IP=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=${{ env.REPO_NAME }}-${{ env.ENVIRONMENT }}" "Name=instance-state-name,Values=running" \
+          --query "Reservations[0].Instances[0].PublicIpAddress" \
+          --output text)
+
+        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+
+    - name: Install and enable fail2ban
+      run: |
+        ssh -o StrictHostKeyChecking=no -i ../id_ed25519 ubuntu@${{ env.PUBLIC_IP }} << 'EOF'
+        sudo apt-get update
+        sudo apt-get install -y fail2ban
+        echo '[sshd]
+        enabled = true
+        port = ssh
+        filter = sshd
+        logpath = /var/log/auth.log
+        maxretry = 5
+        bantime = 1h
+        findtime = 10m' | sudo tee /etc/fail2ban/jail.local > /dev/null
+        sudo systemctl enable fail2ban
+        sudo systemctl restart fail2ban
+        echo "--- fail2ban sshd jail status ---"
+        sudo fail2ban-client status sshd
+        EOF

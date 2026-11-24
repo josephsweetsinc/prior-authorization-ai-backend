@@ -77,7 +77,7 @@ module "ec2_instance" {
       sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
     sudo apt-get update
 
-    sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin nginx git certbot htop -y
+    sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin nginx git certbot htop fail2ban -y
     sudo groupadd docker
     sudo usermod -aG docker ubuntu
 
@@ -86,6 +86,23 @@ module "ec2_instance" {
     sudo systemctl enable docker.service
     sudo systemctl enable containerd.service
     sudo systemctl start docker
+
+    # Auto-block IPs that repeatedly fail SSH login, since port 22 has
+    # to stay open to 0.0.0.0/0 for both admin access and this
+    # project's own GitHub Actions deploy workflows (which connect
+    # from GitHub's shared, non-fixed runner IP ranges, so it can't
+    # be restricted to a single allowed source instead).
+
+    echo '[sshd]
+    enabled = true
+    port = ssh
+    filter = sshd
+    logpath = /var/log/auth.log
+    maxretry = 5
+    bantime = 1h
+    findtime = 10m' | sudo tee /etc/fail2ban/jail.local > /dev/null
+    sudo systemctl enable fail2ban
+    sudo systemctl restart fail2ban
 
     # Set up ssh access to git account
 
