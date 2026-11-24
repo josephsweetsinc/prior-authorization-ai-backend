@@ -10,6 +10,7 @@ from models.incoming_fax import FaxDirection, FaxStatus
 from services.fax.fax_service import (
     FaxService,
     _get_shared_ringcentral_client,
+    count_new_fax_messages,
     extract_fax_message_ids,
 )
 from services.fax.ringcentral_client import RingCentralClient
@@ -34,6 +35,61 @@ class TestExtractFaxMessageIds:
         """Test that a payload with no changes returns an empty list."""
         assert extract_fax_message_ids({'body': {}}) == []
         assert extract_fax_message_ids({}) == []
+
+    def test_reads_new_message_ids_key(self):
+        """Test that the `newMessageIds` key some accounts send is read,
+        not just the undocumented `ids` key.
+        """  # noqa: D205
+        payload = {
+            'body': {
+                'changes': [
+                    {'type': 'Fax', 'newMessageIds': ['fax-1']},
+                ]
+            }
+        }
+        assert extract_fax_message_ids(payload) == ['fax-1']
+
+    def test_returns_empty_for_real_notification_shape(self):
+        """Test that RingCentral's documented real-world payload shape
+        (a count, no IDs at all) correctly yields no directly-named
+        IDs, rather than silently matching nothing by accident.
+        """  # noqa: D205
+        payload = {
+            'body': {
+                'changes': [
+                    {'type': 'Fax', 'newCount': 1, 'updatedCount': 0},
+                ]
+            }
+        }
+        assert extract_fax_message_ids(payload) == []
+
+
+class TestCountNewFaxMessages:
+    """Test suite for count_new_fax_messages()."""
+
+    def test_counts_new_count_from_fax_changes_only(self):
+        """Test that only the 'Fax' bucket's newCount is summed."""
+        payload = {
+            'body': {
+                'changes': [
+                    {'type': 'SMS', 'newCount': 5},
+                    {'type': 'Fax', 'newCount': 1},
+                ]
+            }
+        }
+        assert count_new_fax_messages(payload) == 1
+
+    def test_missing_new_count_defaults_to_zero(self):
+        """Test that an omitted newCount (RingCentral omits it when
+        zero) is treated as zero, not an error.
+        """  # noqa: D205
+        payload = {'body': {'changes': [{'type': 'Fax'}]}}
+        assert count_new_fax_messages(payload) == 0
+
+    def test_no_changes_returns_zero(self):
+        """Test that a payload with no changes returns zero."""
+        assert count_new_fax_messages({'body': {}}) == 0
+        assert count_new_fax_messages({}) == 0
 
 
 class TestSharedRingCentralClient:
@@ -339,6 +395,27 @@ class TestFaxService:
         results = await service.process_webhook_payload(payload)
 
         assert len(results) == 2
+
+    @pytest.mark.asyncio
+    async def test_process_webhook_payload_resolves_ids_via_count(
+        self, service, mock_ringcentral_client
+    ):
+        """Test that a real-shaped notification (newCount, no IDs) is
+        resolved by looking up the message store, instead of being
+        mistaken for "no new fax" and dropped.
+        """  # noqa: D205
+        mock_ringcentral_client.list_inbound_fax_messages = AsyncMock(
+            return_value=[{'id': 'rc-real-1'}, {'id': 'rc-real-2'}]
+        )
+
+        results = await service.process_webhook_payload(
+            {'body': {'changes': [{'type': 'Fax', 'newCount': 1}]}}
+        )
+
+        assert len(results) == 2
+        mock_ringcentral_client.list_inbound_fax_messages.assert_awaited_once_with(
+            limit=6
+        )
 
     @pytest.mark.asyncio
     async def test_process_webhook_payload_no_fax_changes(self, service):

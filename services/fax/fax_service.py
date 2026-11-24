@@ -36,17 +36,25 @@ def _get_shared_ringcentral_client() -> RingCentralClient:
 
 
 def extract_fax_message_ids(payload: dict[str, Any]) -> list[str]:
-    """Extract new fax message IDs from a RingCentral webhook payload.
+    """Extract new fax message IDs directly named in a webhook payload.
 
     RingCentral message-store push notifications group changes by
     message type (Fax, SMS, Voicemail, etc.); only the "Fax" bucket's
-    message IDs are relevant here.
+    message IDs are relevant here. RingCentral's documented payload
+    shape does NOT include the actual message ID(s) at all - only a
+    count (see count_new_fax_messages below) - but some accounts/SDK
+    versions have been observed including a `newMessageIds` array, so
+    it (and the undocumented `ids` key this previously assumed was
+    always present) are both read here when available, as the cheap
+    path that avoids an extra API call.
 
     Args:
         payload: Parsed JSON body of the webhook request.
 
     Returns:
-        list[str]: Message IDs for new/updated fax messages.
+        list[str]: Message IDs for new fax messages, or an empty list
+            if this payload doesn't name any directly (the caller
+            should fall back to count_new_fax_messages()).
 
     """
     changes = payload.get('body', {}).get('changes', [])
@@ -54,8 +62,37 @@ def extract_fax_message_ids(payload: dict[str, Any]) -> list[str]:
     for change in changes:
         if change.get('type') != 'Fax':
             continue
-        message_ids.extend(str(mid) for mid in change.get('ids', []))
+        ids = change.get('newMessageIds') or change.get('ids') or []
+        message_ids.extend(str(mid) for mid in ids)
     return message_ids
+
+
+def count_new_fax_messages(payload: dict[str, Any]) -> int:
+    """Count new fax messages signaled by a webhook payload's changes.
+
+    RingCentral's documented message-store push notification format
+    (https://developers.ringcentral.com/guide/notifications/event-filters/message)
+    reports only how many new/updated messages there are per type,
+    not their IDs - a real inbound fax notification's "Fax" change
+    entry carries `newCount: 1` with no `ids`/`newMessageIds` field at
+    all. When extract_fax_message_ids() comes back empty, this count
+    tells the caller whether that's a genuine fax arrival it needs to
+    resolve via the message store, or an unrelated event (SMS,
+    voicemail, the subscription's own renewal ping).
+
+    Args:
+        payload: Parsed JSON body of the webhook request.
+
+    Returns:
+        int: Total `newCount` across all "Fax" change entries.
+
+    """
+    changes = payload.get('body', {}).get('changes', [])
+    return sum(
+        change.get('newCount', 0)
+        for change in changes
+        if change.get('type') == 'Fax'
+    )
 
 
 class FaxService(BaseService):
@@ -105,13 +142,19 @@ class FaxService(BaseService):
         """
         message_ids = extract_fax_message_ids(payload)
         if not message_ids:
+            new_count = count_new_fax_messages(payload)
+            if new_count > 0:
+                message_ids = await self._resolve_new_fax_message_ids(
+                    new_count
+                )
+
+        if not message_ids:
             # Logged at warning (not info) with the raw body: this fires
             # on every non-fax account event too (SMS, voicemail, the
             # subscription's own renewal ping), but it's also the only
-            # evidence available if extract_fax_message_ids' assumptions
-            # about the payload shape ever turn out wrong for a real
-            # fax notification - there's no other way to tell those two
-            # cases apart after the fact.
+            # evidence available if a real fax notification ever turns
+            # out not to carry a usable newCount either - there's no
+            # other way to tell those two cases apart after the fact.
             logger.warning(
                 'Fax webhook payload had no new fax message IDs: %s',
                 payload,
@@ -130,6 +173,39 @@ class FaxService(BaseService):
             if fax:
                 results.append(fax)
         return results
+
+    async def _resolve_new_fax_message_ids(
+        self,
+        new_count: int,
+    ) -> list[str]:
+        """Look up newly-arrived fax message IDs via the message store.
+
+        RingCentral's push notification for a real fax arrival reports
+        only a count (see count_new_fax_messages), not the message
+        ID(s) themselves - they have to be looked up separately.
+        Fetches a few extra beyond new_count in case another
+        notification lands in between (concurrent faxes, a slightly
+        stale count), since process_inbound_message() is idempotent
+        and safely no-ops on any message already stored - that makes
+        over-fetching harmless, while under-fetching could silently
+        drop a fax.
+
+        Args:
+            new_count: Number of new fax messages the webhook payload
+                reported.
+
+        Returns:
+            list[str]: The most recent inbound fax message IDs,
+                newest first.
+
+        """
+        lookup_limit = new_count + 5
+        records = await self._ringcentral_client.list_inbound_fax_messages(
+            limit=lookup_limit
+        )
+        return [
+            str(record['id']) for record in records if record.get('id')
+        ]
 
     async def _create_fax_idempotently(
         self,
