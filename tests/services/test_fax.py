@@ -19,8 +19,46 @@ from services.fax.ringcentral_client import RingCentralClient
 class TestExtractFaxMessageIds:
     """Test suite for extract_fax_message_ids()."""
 
-    def test_extracts_fax_ids_only(self):
-        """Test that only IDs from the 'Fax' change bucket are returned."""
+    def test_extracts_id_from_real_confirmed_payload_shape(self):
+        """Test the actual shape RingCentral sent for a real inbound fax
+        (2026-11-24, this app's own fax-direction=Inbound subscription):
+        the full message record directly in `body`, not a `changes`
+        summary - this is the one real evidence has confirmed, so it
+        takes priority over the other (never actually observed, kept
+        only as a defensive fallback) shapes below.
+        """  # noqa: D205
+        payload = {
+            'uuid': '8716170555624735614',
+            'event': (
+                '/restapi/v1.0/account/~/extension/~'
+                '/fax?direction=Inbound'
+            ),
+            'timestamp': '2026-11-24T21:16:40.307Z',
+            'subscriptionId': 'd960bb59-eed2-4df1-9975-76b49ad1e08b',
+            'body': {
+                'id': 3971500572027,
+                'from': {'phoneNumber': '+15551234567'},
+                'type': 'Fax',
+                'creationTime': '2026-11-24T21:16:27.000Z',
+                'direction': 'Inbound',
+                'messageStatus': 'Received',
+                'faxPageCount': 1,
+            },
+        }
+        assert extract_fax_message_ids(payload) == ['3971500572027']
+
+    def test_ignores_non_fax_direct_body(self):
+        """Test that a direct-body notification for a non-Fax type
+        (e.g. SMS, on a different subscription) isn't mistaken for one.
+        """  # noqa: D205
+        payload = {'body': {'id': 123, 'type': 'SMS'}}
+        assert extract_fax_message_ids(payload) == []
+
+    def test_extracts_fax_ids_only_from_changes_fallback(self):
+        """Test the changes-array fallback shape (never actually
+        observed from this app's subscription, kept defensively):
+        only IDs from the 'Fax' change bucket are returned.
+        """  # noqa: D205
         payload = {
             'body': {
                 'changes': [
@@ -49,10 +87,10 @@ class TestExtractFaxMessageIds:
         }
         assert extract_fax_message_ids(payload) == ['fax-1']
 
-    def test_returns_empty_for_real_notification_shape(self):
-        """Test that RingCentral's documented real-world payload shape
-        (a count, no IDs at all) correctly yields no directly-named
-        IDs, rather than silently matching nothing by accident.
+    def test_returns_empty_for_count_only_changes_shape(self):
+        """Test that a changes-array entry with only a count (no IDs)
+        correctly yields no directly-named IDs, rather than silently
+        matching nothing by accident.
         """  # noqa: D205
         payload = {
             'body': {

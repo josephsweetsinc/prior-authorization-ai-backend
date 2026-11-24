@@ -38,15 +38,22 @@ def _get_shared_ringcentral_client() -> RingCentralClient:
 def extract_fax_message_ids(payload: dict[str, Any]) -> list[str]:
     """Extract new fax message IDs directly named in a webhook payload.
 
-    RingCentral message-store push notifications group changes by
-    message type (Fax, SMS, Voicemail, etc.); only the "Fax" bucket's
-    message IDs are relevant here. RingCentral's documented payload
-    shape does NOT include the actual message ID(s) at all - only a
-    count (see count_new_fax_messages below) - but some accounts/SDK
-    versions have been observed including a `newMessageIds` array, so
-    it (and the undocumented `ids` key this previously assumed was
-    always present) are both read here when available, as the cheap
-    path that avoids an extra API call.
+    Confirmed from a real inbound fax (2026-11-24) delivered to this
+    app's actual subscription, which uses the fax-specific event
+    filter (`/restapi/v1.0/account/~/extension/~/fax?direction=Inbound`,
+    see RingCentralClient.create_subscription's default): RingCentral
+    puts the full message record directly in `body` - `body['id']` is
+    the new message's id, `body['type']` is `'Fax'` - NOT wrapped in
+    a `changes` summary. Earlier assumptions (first that `body.changes`
+    entries carried an `ids`/`newMessageIds` array, then that they
+    only carried a count) were both based on RingCentral's generic
+    message-store notification docs, which turned out not to describe
+    this specific event filter's actual shape at all.
+
+    The `changes`-array shapes are kept as a defensive fallback in
+    case a differently-configured subscription ever sends that style
+    instead, but the direct-body shape above is the one this
+    subscription has actually been observed to send.
 
     Args:
         payload: Parsed JSON body of the webhook request.
@@ -57,7 +64,12 @@ def extract_fax_message_ids(payload: dict[str, Any]) -> list[str]:
             should fall back to count_new_fax_messages()).
 
     """
-    changes = payload.get('body', {}).get('changes', [])
+    body = payload.get('body', {})
+
+    if body.get('type') == 'Fax' and body.get('id') is not None:
+        return [str(body['id'])]
+
+    changes = body.get('changes', [])
     message_ids: list[str] = []
     for change in changes:
         if change.get('type') != 'Fax':
