@@ -5,7 +5,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 
 from config.settings import Settings
 from core import get_service
-from dependencies import get_current_user
+from dependencies import get_current_user, rate_limiter
 from models import User
 from schemas import (
     CreateUserRequestSchema,
@@ -58,12 +58,20 @@ async def signup_user(
 async def login_user(
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
     service: Annotated[AuthService, Depends(get_service(AuthService))],
+    _rate_limit: Annotated[
+        None,
+        Depends(
+            rate_limiter(action='login', limit=10, window_seconds=900)
+        ),
+    ],
 ) -> TokenSchemas:
     """Authenticate user and return access and refresh tokens.
 
     Args:
         form_data (OAuth2PasswordRequestForm): Username and password.
         service (AuthService): Auth service dependency.
+        _rate_limit: Per-IP rate limit (max 10 attempts / 15 min),
+            to slow down password-guessing scripts.
 
     Returns:
         TokenSchemas: Access and refresh tokens with type.
@@ -140,12 +148,22 @@ async def logout_user(
 async def request_password_reset(
     request_data: PasswordResetRequestSchema,
     service: Annotated[PasswordService, Depends(get_service(PasswordService))],
+    _rate_limit: Annotated[
+        None,
+        Depends(
+            rate_limiter(
+                action='password-reset-request', limit=5, window_seconds=3600
+            )
+        ),
+    ],
 ) -> None:
     """Request password reset by sending code to user's email.
 
     Args:
         request_data (PasswordResetRequestSchema): Schema containing user email.
         service (PasswordService): Password reset service dependency.
+        _rate_limit: Per-IP rate limit (max 5 / hour), to stop this
+            from being used to spam someone's inbox with reset codes.
 
     Returns:
         None
@@ -163,12 +181,24 @@ async def request_password_reset(
 async def verify_password_reset_code(
     request_data: PasswordResetVerifySchema,
     service: Annotated[PasswordService, Depends(get_service(PasswordService))],
+    _rate_limit: Annotated[
+        None,
+        Depends(
+            rate_limiter(
+                action='password-reset-verify', limit=10, window_seconds=900
+            )
+        ),
+    ],
 ) -> None:
     """Verify password reset code.
 
     Args:
         request_data (PasswordResetVerifySchema): Schema containing code.
         service (PasswordService): Password reset service dependency.
+        _rate_limit: Per-IP rate limit (max 10 attempts / 15 min).
+            The code itself is only 5 digits (100,000 combinations),
+            so without this, brute-forcing it within its 15-minute
+            expiration window would otherwise be realistic.
 
     Returns:
         None
