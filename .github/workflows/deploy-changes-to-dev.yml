@@ -79,6 +79,16 @@ jobs:
         git pull
         echo "${{ secrets.ENV }}" > .env
         docker compose down
+        # docker compose down only recognizes containers it still
+        # considers part of this project; one from an earlier
+        # interrupted deploy (e.g. a mid-build disk-full failure) can
+        # be left running under the same name without being tracked
+        # anymore, which then makes the "up" step below fail with
+        # "Conflict: container name already in use" instead of
+        # recreating it. Force-remove any container using one of this
+        # project's fixed names first, so "up" always starts clean
+        # regardless of how a previous run left things.
+        docker rm -f paai_redis local_paai_api paai_celery_worker paai_celery_beat 2>/dev/null || true
         docker system prune -af && docker builder prune --all --force
         docker compose up -d --build
         docker compose exec -T paai_api uv run alembic -c models/alembic.ini upgrade head
