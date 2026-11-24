@@ -80,4 +80,13 @@ jobs:
         ls -la config/celery.py
         echo "--- fresh process broker_url resolution, right now ---"
         docker compose exec -T paai_api uv run python -c "from config.celery import celery_app; print('BROKER:', celery_app.conf.broker_url)" < /dev/null
+        echo "--- fresh process: does .delay() itself actually work, right now? ---"
+        docker compose exec -T paai_api uv run python -c "
+        from tasks.fax_processing import process_inbound_fax
+        try:
+            result = process_inbound_fax.delay(999999999)
+            print('DELAY SUCCEEDED, task id:', result.id)
+        except Exception as e:
+            print('DELAY FAILED:', repr(e))
+        " < /dev/null
         EOF
