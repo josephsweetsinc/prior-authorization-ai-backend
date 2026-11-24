@@ -50,43 +50,30 @@ jobs:
       run: |
         ssh -o StrictHostKeyChecking=no -i ../id_ed25519 ubuntu@${{ env.PUBLIC_IP }} << 'EOF'
         cd ~/prior-authorization-ai-backend
-        echo "--- docker compose ps ---"
-        docker compose ps
-        echo "--- paai_api's REDIS_URL env var ---"
-        docker compose exec -T paai_api printenv REDIS_URL < /dev/null
-        echo "--- DNS resolution of 'redis' from inside paai_api ---"
-        docker compose exec -T paai_api getent hosts redis < /dev/null || echo "getent failed"
-        echo "--- TCP connect test from paai_api to redis:6379 ---"
-        docker compose exec -T paai_api python3 -c "
-        import socket
-        try:
-            s = socket.create_connection(('redis', 6379), timeout=3)
-            print('CONNECTED')
-            s.close()
-        except Exception as e:
-            print('FAILED:', repr(e))
-        " < /dev/null
-        echo "--- redis container's own logs (last 20 lines) ---"
-        docker compose logs redis --tail 20
-        echo "--- host git HEAD ---"
-        git log -1 --oneline
-        echo "--- config/celery.py on host, does it have the new log line? ---"
-        grep -n "resolved to" config/celery.py || echo "NOT FOUND on host"
-        echo "--- config/celery.py as paai_api sees it ---"
-        docker compose exec -T paai_api grep -n "resolved to" config/celery.py < /dev/null || echo "NOT FOUND in container"
-        echo "--- stale __pycache__ check for config/celery ---"
-        find __pycache__ -iname "celery*" -exec ls -la {} \; 2>/dev/null || echo "no top-level __pycache__/celery* match"
-        find config/__pycache__ -iname "celery*" -exec ls -la {} \; 2>/dev/null || echo "no config/__pycache__/celery* match"
-        ls -la config/celery.py
-        echo "--- fresh process broker_url resolution, right now ---"
-        docker compose exec -T paai_api uv run python -c "from config.celery import celery_app; print('BROKER:', celery_app.conf.broker_url)" < /dev/null
-        echo "--- fresh process: does .delay() itself actually work, right now? ---"
+        echo "--- raw kombu Connection test, bypassing Celery entirely ---"
         docker compose exec -T paai_api uv run python -c "
-        from tasks.fax_processing import process_inbound_fax
+        import kombu
+        print('kombu version:', kombu.__version__)
+        conn = kombu.Connection('redis://redis:6379/0')
+        print('transport_cls:', conn.transport_cls)
+        print('hostname seen by kombu:', conn.hostname)
+        print('port seen by kombu:', conn.port)
         try:
-            result = process_inbound_fax.delay(999999999)
-            print('DELAY SUCCEEDED, task id:', result.id)
+            conn.connect()
+            print('RAW KOMBU CONNECT SUCCEEDED')
         except Exception as e:
-            print('DELAY FAILED:', repr(e))
+            print('RAW KOMBU CONNECT FAILED:', repr(e))
+        " < /dev/null
+        echo "--- does celery_app.conf have broker_transport set to something odd? ---"
+        docker compose exec -T paai_api uv run python -c "
+        from config.celery import celery_app
+        print('broker_url:', celery_app.conf.broker_url)
+        print('broker_read_url:', celery_app.conf.broker_read_url)
+        print('broker_write_url:', celery_app.conf.broker_write_url)
+        print('result_backend:', celery_app.conf.result_backend)
+        print('task_always_eager:', celery_app.conf.task_always_eager)
+        conn = celery_app.connection_for_write()
+        print('celery connection_for_write hostname:', conn.hostname)
+        print('celery connection_for_write transport_cls:', conn.transport_cls)
         " < /dev/null
         EOF
